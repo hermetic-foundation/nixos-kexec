@@ -18,7 +18,12 @@ The installer environment must boot with:
 - SSH access for the same target address
 - Nix with `nix-command` and flakes available
 - `kexec-tools`
-- network access to the NixOS flake and `disk-nix`
+- network access to the NixOS flake
+
+If the installer image already includes a compatible `disk-nix` executable, pass
+`--disk-nix-command disk-nix` to avoid fetching the flake app at install time.
+Without that option, the installer also needs network access to the configured
+`disk-nix` flake app.
 
 ## Usage
 
@@ -54,6 +59,9 @@ nixos-kexec run root@192.0.2.10 \
   --execute
 ```
 
+For tests or staged handoffs where another process handles the final restart,
+add `--no-final-reboot`.
+
 The generated workflow:
 
 1. Checks remote root access and required kexec tooling.
@@ -86,3 +94,8 @@ The `e2eCli` check runs the packaged binary against fixture kernel, initrd, and
 disk-nix spec files. It validates JSON plan output, reviewable script rendering,
 the executable script mode, shell completions, and refusal paths that must not
 touch a remote host.
+
+On `x86_64-linux`, the `kexecVm` check boots a NixOS VM, reaches it over SSH,
+runs the packaged `nixos-kexec run`, kexecs into a NixOS netboot installer
+image, reconnects over SSH, and verifies the post-kexec disk-nix apply/install
+handoff.

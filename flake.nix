@@ -78,6 +78,16 @@
             touch "$out"
           '';
         }
+        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          kexecVm = import ./tests/kexec-vm.nix {
+            inherit
+              nixpkgs
+              package
+              pkgs
+              system
+              ;
+          };
+        }
       );
 
       devShells = forAllSystems (

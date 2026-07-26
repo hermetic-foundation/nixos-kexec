@@ -49,6 +49,22 @@ grep -F 'kexec -l /tmp/nixos-kexec/kexec/kernel' "$script" >/dev/null
 grep -F 'disk-nix-install.json --probe-current --execute' "$script" >/dev/null
 grep -F 'install nixos --spec /tmp/nixos-kexec/disk-nix-install.json' "$script" >/dev/null
 
+"$bin" plan root@192.0.2.10 \
+  --flake github:example/flake#host \
+  --disk-spec "$spec" \
+  --kexec-kernel "$kernel" \
+  --kexec-initrd "$initrd" \
+  --disk-nix-command /run/current-system/sw/bin/disk-nix \
+  --no-final-reboot \
+  --json >"$plan_json"
+
+jq -e '
+  .diskNixCommand == "/run/current-system/sw/bin/disk-nix"
+  and (.commands | length == 8)
+  and (.commands | any(.phase == "disk-nix-apply" and (.argv | any(contains("/run/current-system/sw/bin/disk-nix apply")))))
+  and (.commands | all(.phase != "reboot"))
+' "$plan_json" >/dev/null
+
 if "$bin" run root@192.0.2.10 \
   --flake github:example/flake#host \
   --disk-spec "$spec" \

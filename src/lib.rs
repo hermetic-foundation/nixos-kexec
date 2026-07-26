@@ -70,6 +70,9 @@ pub struct SshCommand {
     /// disk-nix flake app used inside the installer environment.
     #[arg(long, default_value = DEFAULT_DISK_NIX)]
     disk_nix: String,
+    /// Preinstalled disk-nix-compatible command to run instead of `nix run`.
+    #[arg(long, value_name = "COMMAND")]
+    disk_nix_command: Option<String>,
     /// Mount target passed to disk-nix install nixos.
     #[arg(long, default_value = DEFAULT_TARGET_ROOT)]
     target_root: String,
@@ -85,6 +88,9 @@ pub struct SshCommand {
     /// Emit JSON instead of human-readable output.
     #[arg(long)]
     json: bool,
+    /// Stop after the disk-nix install handoff instead of rebooting.
+    #[arg(long)]
+    no_final_reboot: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -107,6 +113,7 @@ pub struct DeploymentPlan {
     pub flake: String,
     pub disk_spec: String,
     pub disk_nix: String,
+    pub disk_nix_command: Option<String>,
     pub target_root: String,
     pub remote_workdir: String,
     pub commands: Vec<PlanCommand>,
@@ -210,24 +217,23 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
         ]
         .join("; "),
     ));
-    commands.push(scp_command(
+    commands.push(scp_to_remote_paths_command(
         command,
         Phase::StageKexec,
         "upload kexec kernel and initrd to the current host",
         false,
-        vec![
-            command.kexec_kernel.display().to_string(),
-            command.kexec_initrd.display().to_string(),
-            format!("{}:{}/kexec/", command.target, command.remote_workdir),
+        &[
+            (&command.kexec_kernel, &remote_kernel),
+            (&command.kexec_initrd, &remote_initrd),
         ],
     ));
-    commands.push(ssh_command(
+    commands.push(disconnect_tolerant_ssh_command(
         command,
         Phase::Kexec,
         "load and enter the staged kexec installer",
         true,
         format!(
-            "set -euo pipefail; kexec -l {} --initrd={} --append {}; sync; systemctl kexec || kexec -e",
+            "set -euo pipefail; kexec -l {} --initrd={} --append {}; echo 'nixos-kexec: entering kexec' >&2; sync; systemctl kexec || kexec -e",
             shell_quote(&remote_kernel),
             shell_quote(&remote_initrd),
             shell_quote(&command.kexec_append)
@@ -269,9 +275,17 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
         "apply disk-nix storage spec inside the installer environment",
         true,
         format!(
-            "set -euo pipefail; nix --extra-experimental-features 'nix-command flakes' run {} -- apply --spec {} --probe-current --execute",
-            shell_quote(&command.disk_nix),
-            shell_quote(&remote_spec)
+            "set -euo pipefail; {}",
+            disk_nix_invocation(
+                command,
+                &[
+                    "apply".to_string(),
+                    "--spec".to_string(),
+                    remote_spec.clone(),
+                    "--probe-current".to_string(),
+                    "--execute".to_string(),
+                ]
+            )
         ),
     ));
     commands.push(ssh_command(
@@ -280,26 +294,39 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
         "mount target storage and run nixos-install through disk-nix",
         true,
         format!(
-            "set -euo pipefail; nix --extra-experimental-features 'nix-command flakes' run {} -- install nixos --spec {} --flake {} --target {} --execute",
-            shell_quote(&command.disk_nix),
-            shell_quote(&remote_spec),
-            shell_quote(&command.flake),
-            shell_quote(&command.target_root)
+            "set -euo pipefail; {}",
+            disk_nix_invocation(
+                command,
+                &[
+                    "install".to_string(),
+                    "nixos".to_string(),
+                    "--spec".to_string(),
+                    remote_spec.clone(),
+                    "--flake".to_string(),
+                    command.flake.clone(),
+                    "--target".to_string(),
+                    command.target_root.clone(),
+                    "--execute".to_string(),
+                ]
+            )
         ),
     ));
-    commands.push(ssh_command(
-        command,
-        Phase::Reboot,
-        "sync and reboot into the installed system",
-        true,
-        "set -euo pipefail; sync; reboot".to_string(),
-    ));
+    if !command.no_final_reboot {
+        commands.push(ssh_command(
+            command,
+            Phase::Reboot,
+            "sync and reboot into the installed system",
+            true,
+            "set -euo pipefail; sync; reboot".to_string(),
+        ));
+    }
 
     Ok(DeploymentPlan {
         target: command.target.clone(),
         flake: command.flake.clone(),
         disk_spec: command.disk_spec.display().to_string(),
         disk_nix: command.disk_nix.clone(),
+        disk_nix_command: command.disk_nix_command.clone(),
         target_root: command.target_root.clone(),
         remote_workdir: command.remote_workdir.clone(),
         commands,
@@ -336,6 +363,9 @@ fn print_plan(output: &mut impl Write, plan: &DeploymentPlan) -> Result<(), AppE
     writeln!(output, "flake: {}", plan.flake)?;
     writeln!(output, "disk spec: {}", plan.disk_spec)?;
     writeln!(output, "disk-nix: {}", plan.disk_nix)?;
+    if let Some(command) = &plan.disk_nix_command {
+        writeln!(output, "disk-nix command: {command}")?;
+    }
     writeln!(output)?;
     for warning in &plan.warnings {
         writeln!(output, "warning: {warning}")?;
@@ -404,6 +434,38 @@ fn ssh_command(
     local_command(phase, description, mutates, argv)
 }
 
+fn disconnect_tolerant_ssh_command(
+    command: &SshCommand,
+    phase: Phase,
+    description: &str,
+    mutates: bool,
+    remote_script: String,
+) -> PlanCommand {
+    let ssh = shell_command(
+        &std::iter::once("ssh".to_string())
+            .chain(
+                command
+                    .ssh_options
+                    .iter()
+                    .flat_map(|option| ["-o".to_string(), option.clone()]),
+            )
+            .chain([command.target.clone(), remote_script])
+            .collect::<Vec<_>>(),
+    );
+    local_command(
+        phase,
+        description,
+        mutates,
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "output=$({ssh} 2>&1); status=$?; printf '%s\\n' \"$output\"; [ \"$status\" -eq 0 ] || {{ [ \"$status\" -eq 255 ] && case \"$output\" in *'nixos-kexec: entering kexec'*) true ;; *) false ;; esac; }}"
+            ),
+        ],
+    )
+}
+
 fn scp_command(
     command: &SshCommand,
     phase: Phase,
@@ -420,6 +482,41 @@ fn scp_command(
     );
     argv.extend(args);
     local_command(phase, description, mutates, argv)
+}
+
+fn scp_to_remote_paths_command(
+    command: &SshCommand,
+    phase: Phase,
+    description: &str,
+    mutates: bool,
+    files: &[(&PathBuf, &str)],
+) -> PlanCommand {
+    let commands = files
+        .iter()
+        .map(|(local_path, remote_path)| {
+            shell_command(
+                &std::iter::once("scp".to_string())
+                    .chain(
+                        command
+                            .ssh_options
+                            .iter()
+                            .flat_map(|option| ["-o".to_string(), option.clone()]),
+                    )
+                    .chain([
+                        local_path.display().to_string(),
+                        format!("{}:{remote_path}", command.target),
+                    ])
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" && ");
+    local_command(
+        phase,
+        description,
+        mutates,
+        vec!["sh".to_string(), "-c".to_string(), commands],
+    )
 }
 
 fn local_command(phase: Phase, description: &str, mutates: bool, argv: Vec<String>) -> PlanCommand {
@@ -451,6 +548,23 @@ fn await_ssh_script(command: &SshCommand) -> String {
     format!(
         "deadline=$((SECONDS + 600)); until {ssh}; do if [ \"$SECONDS\" -ge \"$deadline\" ]; then echo 'timed out waiting for installer SSH' >&2; exit 1; fi; sleep 5; done"
     )
+}
+
+fn disk_nix_invocation(command: &SshCommand, args: &[String]) -> String {
+    let mut argv = if let Some(disk_nix_command) = &command.disk_nix_command {
+        vec![disk_nix_command.clone()]
+    } else {
+        vec![
+            "nix".to_string(),
+            "--extra-experimental-features".to_string(),
+            "nix-command flakes".to_string(),
+            "run".to_string(),
+            command.disk_nix.clone(),
+            "--".to_string(),
+        ]
+    };
+    argv.extend(args.iter().cloned());
+    shell_command(&argv)
 }
 
 fn shell_command(argv: &[String]) -> String {
@@ -490,11 +604,13 @@ mod tests {
             kexec_initrd: initrd,
             kexec_append: "console=ttyS0".to_string(),
             disk_nix: DEFAULT_DISK_NIX.to_string(),
+            disk_nix_command: None,
             target_root: DEFAULT_TARGET_ROOT.to_string(),
             remote_workdir: DEFAULT_REMOTE_WORKDIR.to_string(),
             ssh_options: vec!["StrictHostKeyChecking=accept-new".to_string()],
             script_out: None,
             json: false,
+            no_final_reboot: false,
         }
     }
 
@@ -546,5 +662,29 @@ mod tests {
         let error = build_plan(&command).unwrap_err().to_string();
 
         assert!(error.contains("SSH target should include a user"));
+    }
+
+    #[test]
+    fn plan_can_use_preinstalled_disk_nix_command_without_final_reboot() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = fixture_command(&temp);
+        command.disk_nix_command = Some("/run/current-system/sw/bin/disk-nix".to_string());
+        command.no_final_reboot = true;
+
+        let plan = build_plan(&command).unwrap();
+
+        assert_eq!(plan.commands.len(), 8);
+        assert_eq!(plan.commands.last().unwrap().phase, Phase::NixosInstall);
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::DiskNixApply
+                && command
+                    .argv
+                    .iter()
+                    .any(|arg| arg.contains("/run/current-system/sw/bin/disk-nix apply"))
+        }));
+        assert!(plan
+            .commands
+            .iter()
+            .all(|command| command.phase != Phase::Reboot));
     }
 }
