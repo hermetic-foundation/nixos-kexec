@@ -1,0 +1,18 @@
+[package]
+name = "nixos-kexec"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/hermetic-foundation/nixos-kexec"
+description = "NixOS deployment through kexec with disk-nix storage management"
+rust-version = "1.81"
+
+[dependencies]
+clap = { version = "4.5.30", features = ["derive"] }
+clap_complete = "4.5.45"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.138"
+thiserror = "2.0.11"
+
+[dev-dependencies]
+tempfile = "3.16.0"
