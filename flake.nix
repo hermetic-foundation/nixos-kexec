@@ -58,11 +58,23 @@
         system:
         let
           pkgs = pkgsFor system;
+          package = self.packages.${system}.default;
         in
         {
-          default = self.packages.${system}.default;
+          default = package;
           formatting = pkgs.runCommand "nixos-kexec-formatting-check" { } ''
             ${pkgs.rustfmt}/bin/cargo-fmt --manifest-path ${self}/Cargo.toml --check
+            touch "$out"
+          '';
+          e2eCli = pkgs.runCommand "nixos-kexec-e2e-cli-check" { } ''
+            ${pkgs.bash}/bin/bash -n ${self + /tests/e2e-cli.sh}
+            NIXOS_KEXEC_BIN=${package}/bin/nixos-kexec \
+              PATH=${pkgs.lib.makeBinPath [
+                pkgs.coreutils
+                pkgs.gnugrep
+                pkgs.jq
+              ]} \
+              ${pkgs.bash}/bin/bash ${self + /tests/e2e-cli.sh}
             touch "$out"
           '';
         }

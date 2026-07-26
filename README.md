@@ -73,3 +73,16 @@ are the intended review path before mutating a host.
 Keep console, IPMI, or physical access available when testing. Kexec replaces
 the running kernel immediately, and storage provisioning can be destructive
 when the `disk-nix` spec formats disks.
+
+## Testing
+
+Run the full local check suite:
+
+```sh
+nix flake check
+```
+
+The `e2eCli` check runs the packaged binary against fixture kernel, initrd, and
+disk-nix spec files. It validates JSON plan output, reviewable script rendering,
+the executable script mode, shell completions, and refusal paths that must not
+touch a remote host.
