@@ -13,6 +13,9 @@ This repository currently provides an initial CLI that renders and can execute a
 reviewable SSH orchestration script. It expects you to supply the kexec kernel
 and initrd artifacts for the installer environment.
 
+The local machine running `nixos-kexec` must have `ssh`, `scp`, and `timeout`
+available.
+
 The installer environment must boot with:
 
 - SSH access for the same target address
@@ -26,6 +29,9 @@ Without that option, the installer also needs network access to the configured
 `disk-nix` flake app.
 
 ## Usage
+
+See [examples](./examples/) for end-to-end command flows and sample
+`disk-nix` install specs.
 
 Render a plan:
 

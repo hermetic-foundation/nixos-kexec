@@ -18,6 +18,14 @@ printf 'initrd\n' >"$initrd"
 "$bin" --help | grep -F 'Deploy NixOS through kexec with disk-nix storage management' >/dev/null
 "$bin" completions bash | grep -F 'nixos-kexec' >/dev/null
 
+if [ -n "${NIXOS_KEXEC_EXAMPLES_DIR:-}" ]; then
+  "${NIXOS_KEXEC_BASH:-bash}" -n "$NIXOS_KEXEC_EXAMPLES_DIR/install-from-template.sh"
+  "${NIXOS_KEXEC_BASH:-bash}" -n "$NIXOS_KEXEC_EXAMPLES_DIR/install-with-preinstalled-disk-nix.sh"
+  jq -e '.version == 1' "$NIXOS_KEXEC_EXAMPLES_DIR/specs/simple-root.json" >/dev/null
+  jq -e '.version == 1 and .pools.zroot.operation == "create"' \
+    "$NIXOS_KEXEC_EXAMPLES_DIR/specs/zfs-encrypted-root.by-id.json" >/dev/null
+fi
+
 "$bin" plan root@192.0.2.10 \
   --flake github:example/flake#host \
   --disk-spec "$spec" \

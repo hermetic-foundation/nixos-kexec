@@ -530,7 +530,8 @@ fn local_command(phase: Phase, description: &str, mutates: bool, argv: Vec<Strin
 
 fn await_ssh_script(command: &SshCommand) -> String {
     let ssh = shell_command(
-        &std::iter::once("ssh".to_string())
+        &std::iter::once("timeout".to_string())
+            .chain(["15s".to_string(), "ssh".to_string()])
             .chain(
                 command
                     .ssh_options
@@ -649,6 +650,7 @@ mod tests {
         assert!(script.starts_with("#!/usr/bin/env bash\nset -euo pipefail"));
         assert!(script.contains("WARNING: kexec replaces the running kernel immediately"));
         assert!(script.contains("ssh -o StrictHostKeyChecking=accept-new root@192.0.2.10"));
+        assert!(script.contains("until timeout 15s ssh"));
         assert!(script.contains("nix --extra-experimental-features"));
         assert!(script.contains("github:hermetic-foundation/disk-nix#disk-nix"));
     }

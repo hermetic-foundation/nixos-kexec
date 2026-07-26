@@ -1,0 +1,110 @@
+{
+  "apply": {
+    "allowDestructive": true,
+    "allowFormat": true,
+    "allowGrow": true,
+    "allowOffline": true,
+    "allowPotentialDataLoss": true,
+    "allowShrink": true,
+    "requireBackup": false
+  },
+  "datasets": {
+    "zroot/root": {
+      "mountpoint": "/",
+      "operation": "create",
+      "properties": {
+        "encryption": "aes-256-gcm",
+        "keyformat": "passphrase",
+        "keylocation": "prompt"
+      }
+    },
+    "zroot/root/nix": {
+      "mountpoint": "/nix",
+      "operation": "create",
+      "properties": {
+        "mountpoint": "/nix"
+      }
+    }
+  },
+  "disks": {
+    "/dev/disk/by-id/replace-me-install-disk": {
+      "operation": "create",
+      "partitionType": "gpt"
+    }
+  },
+  "filesystems": {
+    "root:ESP": {
+      "device": "/dev/disk/by-id/replace-me-install-disk-part1",
+      "fsType": "vfat",
+      "mountpoint": "/boot",
+      "operation": "format",
+      "options": [
+        "nofail"
+      ],
+      "preserveData": false
+    }
+  },
+  "partitions": {
+    "root:ESP": {
+      "device": "/dev/disk/by-id/replace-me-install-disk",
+      "end": "1025MiB",
+      "name": "ESP",
+      "operation": "create",
+      "partitionNumber": "1",
+      "partitionType": "primary",
+      "size": "1G",
+      "start": "1MiB",
+      "target": "/dev/disk/by-id/replace-me-install-disk-part1"
+    },
+    "root:zfs": {
+      "device": "/dev/disk/by-id/replace-me-install-disk",
+      "end": "100%",
+      "name": "zfs",
+      "operation": "create",
+      "partitionNumber": "2",
+      "partitionType": "primary",
+      "size": "100%",
+      "start": "1025MiB",
+      "target": "/dev/disk/by-id/replace-me-install-disk-part2"
+    }
+  },
+  "pools": {
+    "zroot": {
+      "devices": [
+        "/dev/disk/by-id/replace-me-install-disk-part2"
+      ],
+      "operation": "create",
+      "properties": {
+        "acltype": "posixacl",
+        "ashift": "12",
+        "com.sun:auto-snapshot": "true",
+        "compression": "zstd",
+        "mountpoint": "none",
+        "xattr": "sa"
+      }
+    }
+  },
+  "swaps": {
+    "zroot/root/swap": {
+      "device": "/dev/zvol/zroot/root/swap",
+      "operation": "format",
+      "preserveData": false
+    }
+  },
+  "version": 1,
+  "zvols": {
+    "zroot/root/swap": {
+      "desiredSize": "10G",
+      "operation": "create",
+      "properties": {
+        "com.sun:auto-snapshot": "false",
+        "compression": "zle",
+        "logbias": "throughput",
+        "primarycache": "metadata",
+        "secondarycache": "none",
+        "sync": "always",
+        "volblocksize": "4096"
+      }
+    }
+  }
+}

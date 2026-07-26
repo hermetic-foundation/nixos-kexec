@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "filesystems": {
+    "root": {
+      "mountpoint": "/",
+      "type": "xfs",
+      "resizePolicy": "grow-only",
+      "desiredSize": "100%",
+      "preserveData": true
+    }
+  }
+}
+

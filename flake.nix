@@ -69,6 +69,8 @@
           e2eCli = pkgs.runCommand "nixos-kexec-e2e-cli-check" { } ''
             ${pkgs.bash}/bin/bash -n ${self + /tests/e2e-cli.sh}
             NIXOS_KEXEC_BIN=${package}/bin/nixos-kexec \
+              NIXOS_KEXEC_BASH=${pkgs.bash}/bin/bash \
+              NIXOS_KEXEC_EXAMPLES_DIR=${self + /examples} \
               PATH=${pkgs.lib.makeBinPath [
                 pkgs.coreutils
                 pkgs.gnugrep
