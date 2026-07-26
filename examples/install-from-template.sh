@@ -10,6 +10,16 @@ set -euo pipefail
 WORKDIR="${WORKDIR:-./build/nixos-kexec-example}"
 SPEC="${SPEC:-$WORKDIR/disk-nix-install.json}"
 SCRIPT="${SCRIPT:-$WORKDIR/nixos-kexec-install.sh}"
+FLAKE_SOURCE_ARGS=()
+SSH_TTY_ARGS=()
+
+if [ -n "${FLAKE_SOURCE:-}" ]; then
+  FLAKE_SOURCE_ARGS=(--flake-source "$FLAKE_SOURCE")
+fi
+
+if [ "${SSH_TTY:-0}" = 1 ]; then
+  SSH_TTY_ARGS=(--ssh-tty)
+fi
 
 mkdir -p "$WORKDIR"
 
@@ -20,17 +30,20 @@ disk-nix install template zfs-root \
 
 nixos-kexec plan "$TARGET" \
   --flake "$FLAKE" \
-  --disk-spec "$SPEC" \
-  --kexec-kernel "$KEXEC_KERNEL" \
-  --kexec-initrd "$KEXEC_INITRD"
-
-nixos-kexec script "$TARGET" \
-  --flake "$FLAKE" \
+  "${FLAKE_SOURCE_ARGS[@]}" \
   --disk-spec "$SPEC" \
   --kexec-kernel "$KEXEC_KERNEL" \
   --kexec-initrd "$KEXEC_INITRD" \
+  "${SSH_TTY_ARGS[@]}"
+
+nixos-kexec script "$TARGET" \
+  --flake "$FLAKE" \
+  "${FLAKE_SOURCE_ARGS[@]}" \
+  --disk-spec "$SPEC" \
+  --kexec-kernel "$KEXEC_KERNEL" \
+  --kexec-initrd "$KEXEC_INITRD" \
+  "${SSH_TTY_ARGS[@]}" \
   --script-out "$SCRIPT"
 
 printf 'review %s, then run:\n' "$SCRIPT"
 printf '  %s\n' "$SCRIPT"
-

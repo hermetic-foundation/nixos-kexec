@@ -21,17 +21,27 @@ The installer environment must boot with:
 - SSH access for the same target address
 - Nix with `nix-command` and flakes available
 - `kexec-tools`
-- network access to the NixOS flake
+- network access to the NixOS flake, unless `--flake-source` stages it
 
 If the installer image already includes a compatible `disk-nix` executable, pass
 `--disk-nix-command disk-nix` to avoid fetching the flake app at install time.
 Without that option, the installer also needs network access to the configured
 `disk-nix` flake app.
 
+For local or private flake directories, pass `--flake-source /path/to/flake`.
+`nixos-kexec` uploads that directory after kexec and rewrites the install
+handoff to use the staged path inside the installer. The `--flake` value must
+still include the target host fragment, such as `path:/home/me/flake#host`.
+
+For encrypted storage specs that prompt for a passphrase, pass `--ssh-tty` so
+mutating remote commands can allocate a TTY.
+
 ## Usage
 
 See [examples](./examples/) for end-to-end command flows and sample
-`disk-nix` install specs.
+`disk-nix` install specs. The examples include `kexec-installer.nix`, which can
+build a kexec installer tree with SSH, `disk-nix`, ZFS, partitioning tools, and
+tar available.
 
 Render a plan:
 
@@ -58,10 +68,12 @@ Run the orchestration only after reviewing the script:
 
 ```sh
 nixos-kexec run root@192.0.2.10 \
-  --flake github:you/flake#host \
+  --flake path:/home/me/flake#host \
+  --flake-source /home/me/flake \
   --disk-spec ./disk-nix-install.json \
   --kexec-kernel ./bzImage \
   --kexec-initrd ./initrd \
+  --ssh-tty \
   --execute
 ```
 
@@ -74,10 +86,11 @@ The generated workflow:
 2. Uploads the installer kernel and initrd.
 3. Loads and enters the kexec installer.
 4. Waits for SSH to return.
-5. Uploads the `disk-nix` install spec.
-6. Runs `disk-nix apply --execute`.
-7. Runs `disk-nix install nixos --execute`.
-8. Reboots into the installed system.
+5. Optionally uploads a local flake source.
+6. Uploads the `disk-nix` install spec.
+7. Runs `disk-nix apply --execute`.
+8. Runs `disk-nix install nixos --execute`.
+9. Reboots into the installed system.
 
 ## Safety
 

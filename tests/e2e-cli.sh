@@ -6,12 +6,15 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 spec="$tmpdir/disk-nix-install.json"
+flake_source="$tmpdir/flake-source"
 kernel="$tmpdir/bzImage"
 initrd="$tmpdir/initrd"
 script="$tmpdir/nixos-kexec.sh"
 plan_json="$tmpdir/plan.json"
 
 printf '{"version":1,"apply":{"mode":"install"}}\n' >"$spec"
+mkdir -p "$flake_source"
+printf '{}\n' >"$flake_source/flake.nix"
 printf 'kernel\n' >"$kernel"
 printf 'initrd\n' >"$initrd"
 
@@ -59,16 +62,22 @@ grep -F 'install nixos --spec /tmp/nixos-kexec/disk-nix-install.json' "$script" 
 
 "$bin" plan root@192.0.2.10 \
   --flake github:example/flake#host \
+  --flake-source "$flake_source" \
   --disk-spec "$spec" \
   --kexec-kernel "$kernel" \
   --kexec-initrd "$initrd" \
+  --ssh-tty \
   --disk-nix-command /run/current-system/sw/bin/disk-nix \
   --no-final-reboot \
   --json >"$plan_json"
 
 jq -e '
   .diskNixCommand == "/run/current-system/sw/bin/disk-nix"
-  and (.commands | length == 8)
+  and .sshTty == true
+  and .installFlake == "path:/tmp/nixos-kexec/flake-source#host"
+  and (.commands | length == 9)
+  and (.commands | any(.phase == "stage-install" and (.argv | any(contains("tar -C") and contains("flake-source")))))
+  and (.commands | any(.phase == "disk-nix-apply" and (.argv | any(. == "-tt"))))
   and (.commands | any(.phase == "disk-nix-apply" and (.argv | any(contains("/run/current-system/sw/bin/disk-nix apply")))))
   and (.commands | all(.phase != "reboot"))
 ' "$plan_json" >/dev/null

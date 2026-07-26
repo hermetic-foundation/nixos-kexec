@@ -55,6 +55,9 @@ pub struct SshCommand {
     /// NixOS flake installable such as github:you/flake#host.
     #[arg(long)]
     flake: String,
+    /// Local flake directory to upload into the installer before nixos-install.
+    #[arg(long, value_name = "PATH")]
+    flake_source: Option<PathBuf>,
     /// disk-nix install spec to upload and apply.
     #[arg(long, value_name = "PATH")]
     disk_spec: PathBuf,
@@ -82,6 +85,9 @@ pub struct SshCommand {
     /// Extra option passed to ssh and scp.
     #[arg(long = "ssh-option", value_name = "OPTION")]
     ssh_options: Vec<String>,
+    /// Allocate a TTY for mutating remote SSH commands that may prompt.
+    #[arg(long)]
+    ssh_tty: bool,
     /// Write the rendered script to this path.
     #[arg(long, value_name = "PATH")]
     script_out: Option<PathBuf>,
@@ -111,9 +117,12 @@ pub enum Phase {
 pub struct DeploymentPlan {
     pub target: String,
     pub flake: String,
+    pub install_flake: String,
+    pub flake_source: Option<String>,
     pub disk_spec: String,
     pub disk_nix: String,
     pub disk_nix_command: Option<String>,
+    pub ssh_tty: bool,
     pub target_root: String,
     pub remote_workdir: String,
     pub commands: Vec<PlanCommand>,
@@ -194,10 +203,20 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             "target root and remote workdir must be absolute paths".to_string(),
         ));
     }
+    if let Some(flake_source) = &command.flake_source {
+        if !flake_source.is_dir() {
+            return Err(AppError::Message(format!(
+                "flake source is not a directory: {}",
+                flake_source.display()
+            )));
+        }
+    }
 
     let remote_spec = format!("{}/disk-nix-install.json", command.remote_workdir);
     let remote_kernel = format!("{}/kexec/kernel", command.remote_workdir);
     let remote_initrd = format!("{}/kexec/initrd", command.remote_workdir);
+    let remote_flake_source = format!("{}/flake-source", command.remote_workdir);
+    let install_flake = install_flake(command, &remote_flake_source)?;
     let mut commands = Vec::new();
 
     commands.push(ssh_command(
@@ -255,10 +274,17 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
         "prepare installer workdir after kexec",
         false,
         format!(
-            "set -euo pipefail; mkdir -p {}",
+            "set -euo pipefail; command -v tar >/dev/null; mkdir -p {}",
             shell_quote(&command.remote_workdir)
         ),
     ));
+    if let Some(flake_source) = &command.flake_source {
+        commands.push(stage_flake_source_command(
+            command,
+            flake_source,
+            &remote_flake_source,
+        ));
+    }
     commands.push(scp_command(
         command,
         Phase::StageInstall,
@@ -303,7 +329,7 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
                     "--spec".to_string(),
                     remote_spec.clone(),
                     "--flake".to_string(),
-                    command.flake.clone(),
+                    install_flake.clone(),
                     "--target".to_string(),
                     command.target_root.clone(),
                     "--execute".to_string(),
@@ -324,9 +350,15 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
     Ok(DeploymentPlan {
         target: command.target.clone(),
         flake: command.flake.clone(),
+        install_flake,
+        flake_source: command
+            .flake_source
+            .as_ref()
+            .map(|path| path.display().to_string()),
         disk_spec: command.disk_spec.display().to_string(),
         disk_nix: command.disk_nix.clone(),
         disk_nix_command: command.disk_nix_command.clone(),
+        ssh_tty: command.ssh_tty,
         target_root: command.target_root.clone(),
         remote_workdir: command.remote_workdir.clone(),
         commands,
@@ -361,6 +393,12 @@ pub fn render_script(plan: &DeploymentPlan) -> String {
 fn print_plan(output: &mut impl Write, plan: &DeploymentPlan) -> Result<(), AppError> {
     writeln!(output, "target: {}", plan.target)?;
     writeln!(output, "flake: {}", plan.flake)?;
+    if plan.install_flake != plan.flake {
+        writeln!(output, "install flake: {}", plan.install_flake)?;
+    }
+    if let Some(source) = &plan.flake_source {
+        writeln!(output, "flake source: {source}")?;
+    }
     writeln!(output, "disk spec: {}", plan.disk_spec)?;
     writeln!(output, "disk-nix: {}", plan.disk_nix)?;
     if let Some(command) = &plan.disk_nix_command {
@@ -423,6 +461,9 @@ fn ssh_command(
     remote_script: String,
 ) -> PlanCommand {
     let mut argv = vec!["ssh".to_string()];
+    if command.ssh_tty && mutates {
+        argv.push("-tt".to_string());
+    }
     argv.extend(
         command
             .ssh_options
@@ -443,6 +484,7 @@ fn disconnect_tolerant_ssh_command(
 ) -> PlanCommand {
     let ssh = shell_command(
         &std::iter::once("ssh".to_string())
+            .chain(command.ssh_tty.then(|| "-tt".to_string()))
             .chain(
                 command
                     .ssh_options
@@ -519,6 +561,52 @@ fn scp_to_remote_paths_command(
     )
 }
 
+fn stage_flake_source_command(
+    command: &SshCommand,
+    flake_source: &Path,
+    remote_flake_source: &str,
+) -> PlanCommand {
+    let remote_script = format!(
+        "set -euo pipefail; rm -rf {}; mkdir -p {}; tar -xzf - -C {}",
+        shell_quote(remote_flake_source),
+        shell_quote(remote_flake_source),
+        shell_quote(remote_flake_source)
+    );
+    let remote = shell_command(
+        &std::iter::once("ssh".to_string())
+            .chain(
+                command
+                    .ssh_options
+                    .iter()
+                    .flat_map(|option| ["-o".to_string(), option.clone()]),
+            )
+            .chain([command.target.clone(), remote_script])
+            .collect::<Vec<_>>(),
+    );
+    let local = shell_command(&[
+        "tar".to_string(),
+        "-C".to_string(),
+        flake_source.display().to_string(),
+        "--exclude".to_string(),
+        ".git".to_string(),
+        "--exclude".to_string(),
+        ".jj".to_string(),
+        "-czf".to_string(),
+        "-".to_string(),
+        ".".to_string(),
+    ]);
+    local_command(
+        Phase::StageInstall,
+        "upload local flake source into the installer",
+        false,
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("{local} | {remote}"),
+        ],
+    )
+}
+
 fn local_command(phase: Phase, description: &str, mutates: bool, argv: Vec<String>) -> PlanCommand {
     PlanCommand {
         phase,
@@ -549,6 +637,23 @@ fn await_ssh_script(command: &SshCommand) -> String {
     format!(
         "deadline=$((SECONDS + 600)); until {ssh}; do if [ \"$SECONDS\" -ge \"$deadline\" ]; then echo 'timed out waiting for installer SSH' >&2; exit 1; fi; sleep 5; done"
     )
+}
+
+fn install_flake(command: &SshCommand, remote_flake_source: &str) -> Result<String, AppError> {
+    if command.flake_source.is_none() {
+        return Ok(command.flake.clone());
+    }
+    let Some((_, fragment)) = command.flake.split_once('#') else {
+        return Err(AppError::Message(
+            "local flake source staging requires --flake to include a #host fragment".to_string(),
+        ));
+    };
+    if fragment.is_empty() {
+        return Err(AppError::Message(
+            "local flake source staging requires a non-empty #host fragment".to_string(),
+        ));
+    }
+    Ok(format!("path:{remote_flake_source}#{fragment}"))
 }
 
 fn disk_nix_invocation(command: &SshCommand, args: &[String]) -> String {
@@ -600,12 +705,14 @@ mod tests {
         SshCommand {
             target: "root@192.0.2.10".to_string(),
             flake: "github:example/flake#host".to_string(),
+            flake_source: None,
             disk_spec,
             kexec_kernel: kernel,
             kexec_initrd: initrd,
             kexec_append: "console=ttyS0".to_string(),
             disk_nix: DEFAULT_DISK_NIX.to_string(),
             disk_nix_command: None,
+            ssh_tty: false,
             target_root: DEFAULT_TARGET_ROOT.to_string(),
             remote_workdir: DEFAULT_REMOTE_WORKDIR.to_string(),
             ssh_options: vec!["StrictHostKeyChecking=accept-new".to_string()],
@@ -688,5 +795,73 @@ mod tests {
             .commands
             .iter()
             .all(|command| command.phase != Phase::Reboot));
+    }
+
+    #[test]
+    fn ssh_tty_only_applies_to_mutating_ssh_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = fixture_command(&temp);
+        command.ssh_tty = true;
+
+        let plan = build_plan(&command).unwrap();
+
+        assert!(plan.ssh_tty);
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::DiskNixApply
+                && command.argv.first().is_some_and(|arg| arg == "ssh")
+                && command.argv.iter().any(|arg| arg == "-tt")
+        }));
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::Preflight
+                && command.argv.first().is_some_and(|arg| arg == "ssh")
+                && !command.argv.iter().any(|arg| arg == "-tt")
+        }));
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::AwaitInstaller
+                && command.argv.iter().all(|arg| !arg.contains("ssh -tt"))
+        }));
+    }
+
+    #[test]
+    fn local_flake_source_is_staged_and_used_for_install() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("flake.nix"), "{}").unwrap();
+        let mut command = fixture_command(&temp);
+        command.flake = "path:/home/me/flake#host".to_string();
+        command.flake_source = Some(temp.path().to_path_buf());
+        command.no_final_reboot = true;
+
+        let plan = build_plan(&command).unwrap();
+
+        assert_eq!(
+            plan.install_flake,
+            "path:/tmp/nixos-kexec/flake-source#host"
+        );
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::StageInstall
+                && command
+                    .argv
+                    .iter()
+                    .any(|arg| arg.contains("tar -C") && arg.contains("flake-source"))
+        }));
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::NixosInstall
+                && command
+                    .argv
+                    .iter()
+                    .any(|arg| arg.contains("--flake") && arg.contains("flake-source#host"))
+        }));
+    }
+
+    #[test]
+    fn local_flake_source_requires_host_fragment() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = fixture_command(&temp);
+        command.flake = "path:/home/me/flake".to_string();
+        command.flake_source = Some(temp.path().to_path_buf());
+
+        let error = build_plan(&command).unwrap_err().to_string();
+
+        assert!(error.contains("requires --flake to include a #host fragment"));
     }
 }
