@@ -19,6 +19,7 @@ available.
 The installer environment must boot with:
 
 - SSH access for the same target address
+- enough network firmware and tooling for the target hardware
 - Nix with `nix-command` and flakes available
 - `kexec-tools`
 - network access to the NixOS flake, unless `--flake-source` stages it
@@ -49,8 +50,9 @@ artifacts, pass `--kexec-append` explicitly.
 
 See [examples](./examples/) for end-to-end command flows and sample
 `disk-nix` install specs. The examples include `kexec-installer.nix`, which can
-build a kexec installer tree with SSH, `disk-nix`, ZFS, partitioning tools, and
-tar available.
+build a kexec installer tree with SSH, NetworkManager, redistributable firmware,
+explicit Intel Wi-Fi module loading, `disk-nix`, ZFS, partitioning tools, and
+hardware diagnostics available.
 
 Render a plan:
 

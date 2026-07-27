@@ -546,7 +546,8 @@ fn disconnect_tolerant_ssh_command(
     remote_script: String,
 ) -> PlanCommand {
     let ssh = shell_command(
-        &std::iter::once("ssh".to_string())
+        &["timeout".to_string(), "120s".to_string(), "ssh".to_string()]
+            .into_iter()
             .chain(command.ssh_tty.then(|| "-tt".to_string()))
             .chain(
                 command
@@ -565,7 +566,7 @@ fn disconnect_tolerant_ssh_command(
             "sh".to_string(),
             "-c".to_string(),
             format!(
-                "output=$({ssh} 2>&1); status=$?; printf '%s\\n' \"$output\"; [ \"$status\" -eq 0 ] || {{ [ \"$status\" -eq 255 ] && case \"$output\" in *'nixos-kexec: entering kexec'*) true ;; *) false ;; esac; }}"
+                "output=$({ssh} 2>&1); status=$?; printf '%s\\n' \"$output\"; if [ \"$status\" -eq 0 ]; then exit 0; fi; if [ \"$status\" -eq 255 ]; then case \"$output\" in *'nixos-kexec: entering kexec'*|*'Connection to '*' closed.'*) exit 0 ;; esac; fi; exit \"$status\""
             ),
         ],
     )
@@ -728,7 +729,7 @@ fn await_ssh_script(command: &SshCommand) -> String {
             .collect::<Vec<_>>(),
     );
     format!(
-        "deadline=$((SECONDS + 600)); until {ssh}; do if [ \"$SECONDS\" -ge \"$deadline\" ]; then echo 'timed out waiting for installer SSH' >&2; exit 1; fi; sleep 5; done"
+        "deadline=$(($(date +%s) + 600)); while :; do if {ssh}; then break; fi; if [ \"$(date +%s)\" -ge \"$deadline\" ]; then echo 'timed out waiting for installer SSH' >&2; exit 1; fi; sleep 5; done"
     )
 }
 
@@ -926,7 +927,8 @@ mod tests {
         assert!(script.starts_with("#!/usr/bin/env bash\nset -euo pipefail"));
         assert!(script.contains("WARNING: kexec replaces the running kernel immediately"));
         assert!(script.contains("ssh -o StrictHostKeyChecking=accept-new root@192.0.2.10"));
-        assert!(script.contains("until timeout 15s ssh"));
+        assert!(script.contains("timeout 120s ssh"));
+        assert!(script.contains("while :; do if timeout 15s ssh"));
         assert!(script.contains("nix --extra-experimental-features"));
         assert!(script.contains("github:hermetic-foundation/disk-nix#disk-nix"));
     }

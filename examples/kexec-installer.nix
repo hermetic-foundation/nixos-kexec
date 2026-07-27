@@ -17,8 +17,12 @@ nixpkgs.lib.nixosSystem {
       { pkgs, ... }:
       {
         system.stateVersion = "25.11";
+        hardware.enableRedistributableFirmware = true;
+        hardware.firmware = [ pkgs.linux-firmware ];
+
         networking.hostName = "nixos-kexec-installer";
         networking.firewall.enable = false;
+        networking.networkmanager.enable = true;
 
         nix.settings.experimental-features = [
           "nix-command"
@@ -35,8 +39,23 @@ nixpkgs.lib.nixosSystem {
         users.users.root.openssh.authorizedKeys.keys = authorizedKeys;
 
         boot = {
+          initrd.availableKernelModules = [
+            "cfg80211"
+            "mac80211"
+            "iwlwifi"
+            "iwldvm"
+          ];
+          initrd.kernelModules = [
+            "iwlwifi"
+            "iwldvm"
+          ];
+          kernelModules = [
+            "iwlwifi"
+            "iwldvm"
+          ];
           kernelParams = [
             "console=ttyS0"
+            "console=tty0"
             "panic=1"
           ];
           supportedFilesystems = [
@@ -50,9 +69,13 @@ nixpkgs.lib.nixosSystem {
           disk-nix.packages.${system}.disk-nix
           pkgs.dosfstools
           pkgs.gnutar
+          pkgs.iw
           pkgs.kexec-tools
+          pkgs.networkmanager
           pkgs.openssh
           pkgs.parted
+          pkgs.pciutils
+          pkgs.usbutils
           pkgs.util-linux
           pkgs.zfs
         ];

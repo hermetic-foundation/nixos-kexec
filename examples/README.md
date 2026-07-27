@@ -12,7 +12,8 @@ installer handoff and replace all placeholder paths before executing anything.
 - `install-with-preinstalled-disk-nix.sh` uses an installer image that already
   contains a compatible `disk-nix` executable.
 - `kexec-installer.nix` builds a NixOS kexec installer tree with SSH,
-  `disk-nix`, ZFS, partitioning tools, and tar available.
+  NetworkManager, redistributable firmware, explicit Intel Wi-Fi module loading,
+  `disk-nix`, ZFS, partitioning tools, and hardware diagnostics available.
 - `specs/simple-root.json` is a small non-destructive lifecycle-style spec for
   an existing root filesystem.
 - `specs/zfs-encrypted-root.by-id.json` is an install-shape spec for encrypted
