@@ -58,6 +58,9 @@ pub struct SshCommand {
     /// Local flake directory to upload into the installer before nixos-install.
     #[arg(long, value_name = "PATH")]
     flake_source: Option<PathBuf>,
+    /// Prebuilt NixOS system closure to copy into the target and install.
+    #[arg(long, value_name = "STORE_PATH")]
+    system: Option<PathBuf>,
     /// disk-nix install spec to upload and apply.
     #[arg(long, value_name = "PATH")]
     disk_spec: PathBuf,
@@ -108,6 +111,7 @@ pub enum Phase {
     AwaitInstaller,
     StageInstall,
     DiskNixApply,
+    CopySystem,
     NixosInstall,
     Reboot,
 }
@@ -119,6 +123,7 @@ pub struct DeploymentPlan {
     pub flake: String,
     pub install_flake: String,
     pub flake_source: Option<String>,
+    pub system: Option<String>,
     pub disk_spec: String,
     pub disk_nix: String,
     pub disk_nix_command: Option<String>,
@@ -210,6 +215,9 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
                 flake_source.display()
             )));
         }
+    }
+    if let Some(system) = &command.system {
+        require_existing_path("system closure", system)?;
     }
 
     let remote_spec = format!("{}/disk-nix-install.json", command.remote_workdir);
@@ -314,29 +322,65 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             )
         ),
     ));
-    commands.push(ssh_command(
-        command,
-        Phase::NixosInstall,
-        "mount target storage and run nixos-install through disk-nix",
-        true,
-        format!(
-            "set -euo pipefail; {}",
-            disk_nix_invocation(
-                command,
-                &[
-                    "install".to_string(),
-                    "nixos".to_string(),
-                    "--spec".to_string(),
-                    remote_spec.clone(),
-                    "--flake".to_string(),
-                    install_flake.clone(),
-                    "--target".to_string(),
-                    command.target_root.clone(),
-                    "--execute".to_string(),
-                ]
-            )
-        ),
-    ));
+    if let Some(system) = &command.system {
+        commands.push(ssh_command(
+            command,
+            Phase::NixosInstall,
+            "mount target storage through disk-nix",
+            true,
+            format!(
+                "set -euo pipefail; {}",
+                disk_nix_invocation(
+                    command,
+                    &[
+                        "install".to_string(),
+                        "mount".to_string(),
+                        "--spec".to_string(),
+                        remote_spec.clone(),
+                        "--target".to_string(),
+                        command.target_root.clone(),
+                        "--execute".to_string(),
+                    ]
+                )
+            ),
+        ));
+        commands.push(copy_system_command(command, system));
+        commands.push(ssh_command(
+            command,
+            Phase::NixosInstall,
+            "install prebuilt NixOS system closure",
+            true,
+            format!(
+                "set -euo pipefail; nixos-install --root {} --system {} --no-root-passwd",
+                shell_quote(&command.target_root),
+                shell_quote(&system.display().to_string())
+            ),
+        ));
+    } else {
+        commands.push(ssh_command(
+            command,
+            Phase::NixosInstall,
+            "mount target storage and run nixos-install through disk-nix",
+            true,
+            format!(
+                "set -euo pipefail; {}",
+                disk_nix_invocation(
+                    command,
+                    &[
+                        "install".to_string(),
+                        "nixos".to_string(),
+                        "--spec".to_string(),
+                        remote_spec.clone(),
+                        "--flake".to_string(),
+                        install_flake.clone(),
+                        "--target".to_string(),
+                        command.target_root.clone(),
+                        "--execute".to_string(),
+                    ]
+                )
+            ),
+        ));
+    }
     if !command.no_final_reboot {
         commands.push(ssh_command(
             command,
@@ -355,6 +399,7 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             .flake_source
             .as_ref()
             .map(|path| path.display().to_string()),
+        system: command.system.as_ref().map(|path| path.display().to_string()),
         disk_spec: command.disk_spec.display().to_string(),
         disk_nix: command.disk_nix.clone(),
         disk_nix_command: command.disk_nix_command.clone(),
@@ -398,6 +443,9 @@ fn print_plan(output: &mut impl Write, plan: &DeploymentPlan) -> Result<(), AppE
     }
     if let Some(source) = &plan.flake_source {
         writeln!(output, "flake source: {source}")?;
+    }
+    if let Some(system) = &plan.system {
+        writeln!(output, "system: {system}")?;
     }
     writeln!(output, "disk spec: {}", plan.disk_spec)?;
     writeln!(output, "disk-nix: {}", plan.disk_nix)?;
@@ -448,6 +496,17 @@ fn require_file(name: &str, path: &Path) -> Result<(), AppError> {
     } else {
         Err(AppError::Message(format!(
             "{name} does not exist or is not a regular file: {}",
+            path.display()
+        )))
+    }
+}
+
+fn require_existing_path(name: &str, path: &Path) -> Result<(), AppError> {
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(AppError::Message(format!(
+            "{name} does not exist: {}",
             path.display()
         )))
     }
@@ -607,6 +666,36 @@ fn stage_flake_source_command(
     )
 }
 
+fn copy_system_command(command: &SshCommand, system: &Path) -> PlanCommand {
+    let remote_store = format!("local?root={}", command.target_root);
+    let store_uri = format!(
+        "ssh-ng://{}?remote-store={}",
+        command.target,
+        percent_encode_query_value(&remote_store)
+    );
+    let nix_copy = shell_command(&[
+        "nix".to_string(),
+        "copy".to_string(),
+        "--to".to_string(),
+        store_uri,
+        system.display().to_string(),
+    ]);
+    let script = if command.ssh_options.is_empty() {
+        nix_copy
+    } else {
+        format!(
+            "NIX_SSHOPTS={} {nix_copy}",
+            shell_quote(&ssh_options_for_nix(&command.ssh_options))
+        )
+    };
+    local_command(
+        Phase::CopySystem,
+        "copy prebuilt NixOS system closure into the mounted target store",
+        true,
+        vec!["sh".to_string(), "-c".to_string(), script],
+    )
+}
+
 fn local_command(phase: Phase, description: &str, mutates: bool, argv: Vec<String>) -> PlanCommand {
     PlanCommand {
         phase,
@@ -673,6 +762,26 @@ fn disk_nix_invocation(command: &SshCommand, args: &[String]) -> String {
     shell_command(&argv)
 }
 
+fn ssh_options_for_nix(options: &[String]) -> String {
+    options
+        .iter()
+        .flat_map(|option| ["-o".to_string(), option.clone()])
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
 fn shell_command(argv: &[String]) -> String {
     argv.iter()
         .map(|arg| shell_quote(arg))
@@ -706,6 +815,7 @@ mod tests {
             target: "root@192.0.2.10".to_string(),
             flake: "github:example/flake#host".to_string(),
             flake_source: None,
+            system: None,
             disk_spec,
             kexec_kernel: kernel,
             kexec_initrd: initrd,
@@ -863,5 +973,46 @@ mod tests {
         let error = build_plan(&command).unwrap_err().to_string();
 
         assert!(error.contains("requires --flake to include a #host fragment"));
+    }
+
+    #[test]
+    fn prebuilt_system_mounts_copies_and_installs_without_remote_flake_eval() {
+        let temp = tempfile::tempdir().unwrap();
+        let system = temp.path().join("system");
+        fs::create_dir(&system).unwrap();
+        let mut command = fixture_command(&temp);
+        command.system = Some(system.clone());
+        command.no_final_reboot = true;
+
+        let plan = build_plan(&command).unwrap();
+
+        assert_eq!(plan.system, Some(system.display().to_string()));
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::NixosInstall
+                && command
+                    .argv
+                    .iter()
+                    .any(|arg| arg.contains("install mount") && !arg.contains("install nixos"))
+        }));
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::CopySystem
+                && command.argv.iter().any(|arg| {
+                    arg.contains("nix copy --to")
+                        && arg.contains("ssh-ng://root@192.0.2.10")
+                        && arg.contains("remote-store=local%3Froot%3D%2Fmnt")
+                        && arg.contains("NIX_SSHOPTS=")
+                })
+        }));
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::NixosInstall
+                && command
+                    .argv
+                    .iter()
+                    .any(|arg| arg.contains("nixos-install --root /mnt --system"))
+        }));
+        assert!(!plan
+            .commands
+            .iter()
+            .any(|command| command.argv.iter().any(|arg| arg.contains("install nixos"))));
     }
 }

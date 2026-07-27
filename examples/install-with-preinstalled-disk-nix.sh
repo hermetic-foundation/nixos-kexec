@@ -11,9 +11,14 @@ DISK_NIX_COMMAND="${DISK_NIX_COMMAND:-disk-nix}"
 SCRIPT="${SCRIPT:-./nixos-kexec-install.sh}"
 FLAKE_SOURCE_ARGS=()
 SSH_TTY_ARGS=()
+SYSTEM_ARGS=()
 
 if [ -n "${FLAKE_SOURCE:-}" ]; then
   FLAKE_SOURCE_ARGS=(--flake-source "$FLAKE_SOURCE")
+fi
+
+if [ -n "${SYSTEM:-}" ]; then
+  SYSTEM_ARGS=(--system "$SYSTEM")
 fi
 
 if [ "${SSH_TTY:-0}" = 1 ]; then
@@ -23,6 +28,7 @@ fi
 nixos-kexec plan "$TARGET" \
   --flake "$FLAKE" \
   "${FLAKE_SOURCE_ARGS[@]}" \
+  "${SYSTEM_ARGS[@]}" \
   --disk-spec "$DISK_SPEC" \
   --kexec-kernel "$KEXEC_KERNEL" \
   --kexec-initrd "$KEXEC_INITRD" \
@@ -32,6 +38,7 @@ nixos-kexec plan "$TARGET" \
 nixos-kexec script "$TARGET" \
   --flake "$FLAKE" \
   "${FLAKE_SOURCE_ARGS[@]}" \
+  "${SYSTEM_ARGS[@]}" \
   --disk-spec "$DISK_SPEC" \
   --kexec-kernel "$KEXEC_KERNEL" \
   --kexec-initrd "$KEXEC_INITRD" \

@@ -12,9 +12,14 @@ SPEC="${SPEC:-$WORKDIR/disk-nix-install.json}"
 SCRIPT="${SCRIPT:-$WORKDIR/nixos-kexec-install.sh}"
 FLAKE_SOURCE_ARGS=()
 SSH_TTY_ARGS=()
+SYSTEM_ARGS=()
 
 if [ -n "${FLAKE_SOURCE:-}" ]; then
   FLAKE_SOURCE_ARGS=(--flake-source "$FLAKE_SOURCE")
+fi
+
+if [ -n "${SYSTEM:-}" ]; then
+  SYSTEM_ARGS=(--system "$SYSTEM")
 fi
 
 if [ "${SSH_TTY:-0}" = 1 ]; then
@@ -31,6 +36,7 @@ disk-nix install template zfs-root \
 nixos-kexec plan "$TARGET" \
   --flake "$FLAKE" \
   "${FLAKE_SOURCE_ARGS[@]}" \
+  "${SYSTEM_ARGS[@]}" \
   --disk-spec "$SPEC" \
   --kexec-kernel "$KEXEC_KERNEL" \
   --kexec-initrd "$KEXEC_INITRD" \
@@ -39,6 +45,7 @@ nixos-kexec plan "$TARGET" \
 nixos-kexec script "$TARGET" \
   --flake "$FLAKE" \
   "${FLAKE_SOURCE_ARGS[@]}" \
+  "${SYSTEM_ARGS[@]}" \
   --disk-spec "$SPEC" \
   --kexec-kernel "$KEXEC_KERNEL" \
   --kexec-initrd "$KEXEC_INITRD" \

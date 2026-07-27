@@ -36,6 +36,11 @@ still include the target host fragment, such as `path:/home/me/flake#host`.
 For encrypted storage specs that prompt for a passphrase, pass `--ssh-tty` so
 mutating remote commands can allocate a TTY.
 
+For private flakes or hosts that should not build in the installer, build the
+system closure locally and pass `--system /nix/store/...-nixos-system-host`.
+`nixos-kexec` then asks `disk-nix` to mount the target, copies the closure into
+the mounted target store, and runs `nixos-install --system`.
+
 ## Usage
 
 See [examples](./examples/) for end-to-end command flows and sample
@@ -77,6 +82,24 @@ nixos-kexec run root@192.0.2.10 \
   --execute
 ```
 
+Install a locally built system closure:
+
+```sh
+system="$(
+  nix build --no-link --print-out-paths \
+    path:/home/me/flake#nixosConfigurations.host.config.system.build.toplevel
+)"
+
+nixos-kexec run root@192.0.2.10 \
+  --flake path:/home/me/flake#host \
+  --system "$system" \
+  --disk-spec ./disk-nix-install.json \
+  --kexec-kernel ./bzImage \
+  --kexec-initrd ./initrd.gz \
+  --ssh-tty \
+  --execute
+```
+
 For tests or staged handoffs where another process handles the final restart,
 add `--no-final-reboot`.
 
@@ -89,7 +112,9 @@ The generated workflow:
 5. Optionally uploads a local flake source.
 6. Uploads the `disk-nix` install spec.
 7. Runs `disk-nix apply --execute`.
-8. Runs `disk-nix install nixos --execute`.
+8. Runs `disk-nix install nixos --execute`, or with `--system`, runs
+   `disk-nix install mount`, copies the prebuilt closure, and runs
+   `nixos-install --system`.
 9. Reboots into the installed system.
 
 ## Safety

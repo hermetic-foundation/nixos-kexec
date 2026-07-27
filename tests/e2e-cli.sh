@@ -7,6 +7,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 spec="$tmpdir/disk-nix-install.json"
 flake_source="$tmpdir/flake-source"
+system="$tmpdir/system"
 kernel="$tmpdir/bzImage"
 initrd="$tmpdir/initrd"
 script="$tmpdir/nixos-kexec.sh"
@@ -14,6 +15,7 @@ plan_json="$tmpdir/plan.json"
 
 printf '{"version":1,"apply":{"mode":"install"}}\n' >"$spec"
 mkdir -p "$flake_source"
+mkdir -p "$system"
 printf '{}\n' >"$flake_source/flake.nix"
 printf 'kernel\n' >"$kernel"
 printf 'initrd\n' >"$initrd"
@@ -79,6 +81,26 @@ jq -e '
   and (.commands | any(.phase == "stage-install" and (.argv | any(contains("tar -C") and contains("flake-source")))))
   and (.commands | any(.phase == "disk-nix-apply" and (.argv | any(. == "-tt"))))
   and (.commands | any(.phase == "disk-nix-apply" and (.argv | any(contains("/run/current-system/sw/bin/disk-nix apply")))))
+  and (.commands | all(.phase != "reboot"))
+' "$plan_json" >/dev/null
+
+"$bin" plan root@192.0.2.10 \
+  --flake github:example/flake#host \
+  --system "$system" \
+  --disk-spec "$spec" \
+  --kexec-kernel "$kernel" \
+  --kexec-initrd "$initrd" \
+  --ssh-option Port=2222 \
+  --disk-nix-command /run/current-system/sw/bin/disk-nix \
+  --no-final-reboot \
+  --json >"$plan_json"
+
+jq -e --arg system "$system" '
+  .system == $system
+  and (.commands | length == 10)
+  and (.commands | any(.phase == "nixos-install" and (.argv | any(contains("install mount")))))
+  and (.commands | any(.phase == "copy-system" and (.argv | any(contains("nix copy --to") and contains("remote-store=local%3Froot%3D%2Fmnt") and contains("NIX_SSHOPTS=")))))
+  and (.commands | any(.phase == "nixos-install" and (.argv | any(contains("nixos-install --root /mnt --system")))))
   and (.commands | all(.phase != "reboot"))
 ' "$plan_json" >/dev/null
 

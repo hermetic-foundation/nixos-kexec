@@ -71,3 +71,21 @@ nixos-kexec run root@192.0.2.10 \
   --ssh-tty \
   --execute
 ```
+
+For private flakes, build the host locally and pass the resulting system path:
+
+```sh
+system="$(
+  nix build --no-link --print-out-paths \
+    path:/home/me/flake#nixosConfigurations.host.config.system.build.toplevel
+)"
+
+nixos-kexec run root@192.0.2.10 \
+  --flake path:/home/me/flake#host \
+  --system "$system" \
+  --disk-spec ./examples/specs/zfs-encrypted-root.by-id.json \
+  --kexec-kernel ./result/bzImage \
+  --kexec-initrd ./result/initrd.gz \
+  --ssh-tty \
+  --execute
+```
