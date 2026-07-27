@@ -71,8 +71,11 @@ pub struct SshCommand {
     #[arg(long, value_name = "PATH")]
     kexec_initrd: PathBuf,
     /// Kernel command line for the kexec installer environment.
-    #[arg(long, default_value = "console=tty0")]
-    kexec_append: String,
+    ///
+    /// If omitted, nixos-kexec reads the command line from a sibling
+    /// `kexec-boot` script when the kernel comes from a NixOS kexec tree.
+    #[arg(long)]
+    kexec_append: Option<String>,
     /// disk-nix flake app used inside the installer environment.
     #[arg(long, default_value = DEFAULT_DISK_NIX)]
     disk_nix: String,
@@ -224,6 +227,7 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
     let remote_kernel = format!("{}/kexec/kernel", command.remote_workdir);
     let remote_initrd = format!("{}/kexec/initrd", command.remote_workdir);
     let remote_flake_source = format!("{}/flake-source", command.remote_workdir);
+    let kexec_append = effective_kexec_append(command)?;
     let install_flake = install_flake(command, &remote_flake_source)?;
     let mut commands = Vec::new();
 
@@ -263,7 +267,7 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             "set -euo pipefail; kexec -l {} --initrd={} --append {}; echo 'nixos-kexec: entering kexec' >&2; sync; systemctl kexec || kexec -e",
             shell_quote(&remote_kernel),
             shell_quote(&remote_initrd),
-            shell_quote(&command.kexec_append)
+            shell_quote(&kexec_append)
         ),
     ));
     commands.push(local_command(
@@ -745,6 +749,61 @@ fn install_flake(command: &SshCommand, remote_flake_source: &str) -> Result<Stri
     Ok(format!("path:{remote_flake_source}#{fragment}"))
 }
 
+fn effective_kexec_append(command: &SshCommand) -> Result<String, AppError> {
+    if let Some(kexec_append) = &command.kexec_append {
+        return Ok(kexec_append.clone());
+    }
+    let Some(kexec_tree) = command.kexec_kernel.parent() else {
+        return Err(AppError::Message(
+            "could not infer kexec command line; pass --kexec-append explicitly".to_string(),
+        ));
+    };
+    let kexec_boot = kexec_tree.join("kexec-boot");
+    let script = fs::read_to_string(&kexec_boot).map_err(|error| {
+        AppError::Message(format!(
+            "could not infer kexec command line from {}: {error}; pass --kexec-append explicitly",
+            kexec_boot.display()
+        ))
+    })?;
+    parse_kexec_boot_command_line(&script).ok_or_else(|| {
+        AppError::Message(format!(
+            "could not find --command-line in {}; pass --kexec-append explicitly",
+            kexec_boot.display()
+        ))
+    })
+}
+
+fn parse_kexec_boot_command_line(script: &str) -> Option<String> {
+    let marker = "--command-line";
+    let marker_start = script.find(marker)?;
+    let rest = script[marker_start + marker.len()..].trim_start();
+    let mut chars = rest.chars();
+    let quote = chars.next()?;
+    if quote != '"' && quote != '\'' {
+        return rest
+            .split_whitespace()
+            .next()
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+    }
+
+    let mut value = String::new();
+    let mut escaped = false;
+    for character in chars {
+        if escaped {
+            value.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == quote {
+            return Some(value);
+        } else {
+            value.push(character);
+        }
+    }
+    None
+}
+
 fn disk_nix_invocation(command: &SshCommand, args: &[String]) -> String {
     let mut argv = if let Some(disk_nix_command) = &command.disk_nix_command {
         vec![disk_nix_command.clone()]
@@ -819,7 +878,7 @@ mod tests {
             disk_spec,
             kexec_kernel: kernel,
             kexec_initrd: initrd,
-            kexec_append: "console=ttyS0".to_string(),
+            kexec_append: Some("console=ttyS0".to_string()),
             disk_nix: DEFAULT_DISK_NIX.to_string(),
             disk_nix_command: None,
             ssh_tty: false,
@@ -973,6 +1032,42 @@ mod tests {
         let error = build_plan(&command).unwrap_err().to_string();
 
         assert!(error.contains("requires --flake to include a #host fragment"));
+    }
+
+    #[test]
+    fn kexec_append_is_inferred_from_sibling_kexec_boot() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = fixture_command(&temp);
+        command.kexec_append = None;
+        fs::write(
+            temp.path().join("kexec-boot"),
+            r#"kexec --load ./bzImage \
+  --initrd=./initrd.gz \
+  --command-line "init=/nix/store/example-system/init console=ttyS0 panic=1"
+"#,
+        )
+        .unwrap();
+
+        let plan = build_plan(&command).unwrap();
+
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::Kexec
+                && command.argv.iter().any(|arg| {
+                    arg.contains("init=/nix/store/example-system/init console=ttyS0 panic=1")
+                })
+        }));
+    }
+
+    #[test]
+    fn kexec_append_requires_explicit_value_when_no_kexec_boot_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = fixture_command(&temp);
+        command.kexec_append = None;
+
+        let error = build_plan(&command).unwrap_err().to_string();
+
+        assert!(error.contains("could not infer kexec command line"));
+        assert!(error.contains("pass --kexec-append explicitly"));
     }
 
     #[test]

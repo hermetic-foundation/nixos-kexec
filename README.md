@@ -41,6 +41,10 @@ system closure locally and pass `--system /nix/store/...-nixos-system-host`.
 `nixos-kexec` then asks `disk-nix` to mount the target, copies the closure into
 the mounted target store, and runs `nixos-install --system`.
 
+When `--kexec-kernel` points inside a NixOS kexec tree, `nixos-kexec` reads the
+kernel command line from the sibling `kexec-boot` script. For non-NixOS kexec
+artifacts, pass `--kexec-append` explicitly.
+
 ## Usage
 
 See [examples](./examples/) for end-to-end command flows and sample
