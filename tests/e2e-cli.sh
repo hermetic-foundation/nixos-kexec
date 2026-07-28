@@ -106,7 +106,7 @@ jq -e --arg system "$system" '
   .system == $system
   and (.commands | length == 10)
   and (.commands | any(.phase == "nixos-install" and (.argv | any(contains("install mount")))))
-  and (.commands | any(.phase == "copy-system" and (.argv | any(contains("nix copy --to") and contains("remote-store=local%3Froot%3D%2Fmnt") and contains("NIX_SSHOPTS=")))))
+  and (.commands | any(.phase == "copy-system" and (.argv | any(contains("nix copy --no-check-sigs --to") and contains("remote-store=local%3Froot%3D%2Fmnt") and contains("NIX_SSHOPTS=")))))
   and (.commands | any(.phase == "nixos-install" and (.argv | any(contains("nixos-install --root /mnt --system") and contains("--no-channel-copy")))))
   and (.commands | all(.phase != "reboot"))
 ' "$plan_json" >/dev/null

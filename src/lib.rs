@@ -680,6 +680,7 @@ fn copy_system_command(command: &SshCommand, system: &Path) -> PlanCommand {
     let nix_copy = shell_command(&[
         "nix".to_string(),
         "copy".to_string(),
+        "--no-check-sigs".to_string(),
         "--to".to_string(),
         store_uri,
         system.display().to_string(),
@@ -1096,7 +1097,8 @@ mod tests {
         assert!(plan.commands.iter().any(|command| {
             command.phase == Phase::CopySystem
                 && command.argv.iter().any(|arg| {
-                    arg.contains("nix copy --to")
+                    arg.contains("nix copy --no-check-sigs --to")
+                        && arg.contains("--no-check-sigs")
                         && arg.contains("ssh-ng://root@192.0.2.10")
                         && arg.contains("remote-store=local%3Froot%3D%2Fmnt")
                         && arg.contains("NIX_SSHOPTS=")
