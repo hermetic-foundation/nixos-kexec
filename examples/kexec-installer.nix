@@ -1,6 +1,7 @@
 {
   authorizedKeys ? [ ],
   disk-nix,
+  networkManagerProfiles ? { },
   nixpkgs,
   system ? builtins.currentSystem,
 }:
@@ -22,7 +23,11 @@ nixpkgs.lib.nixosSystem {
 
         networking.hostName = "nixos-kexec-installer";
         networking.firewall.enable = false;
-        networking.networkmanager.enable = true;
+        networking.networkmanager = {
+          enable = true;
+          wifi.backend = "iwd";
+          ensureProfiles.profiles = networkManagerProfiles;
+        };
 
         nix.settings.experimental-features = [
           "nix-command"

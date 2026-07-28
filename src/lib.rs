@@ -355,7 +355,7 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             "install prebuilt NixOS system closure",
             true,
             format!(
-                "set -euo pipefail; nixos-install --root {} --system {} --no-root-passwd",
+                "set -euo pipefail; nixos-install --root {} --system {} --no-root-passwd --no-channel-copy",
                 shell_quote(&command.target_root),
                 shell_quote(&system.display().to_string())
             ),
@@ -548,7 +548,6 @@ fn disconnect_tolerant_ssh_command(
     let ssh = shell_command(
         &["timeout".to_string(), "120s".to_string(), "ssh".to_string()]
             .into_iter()
-            .chain(command.ssh_tty.then(|| "-tt".to_string()))
             .chain(
                 command
                     .ssh_options
@@ -988,6 +987,9 @@ mod tests {
                 && !command.argv.iter().any(|arg| arg == "-tt")
         }));
         assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::Kexec && command.argv.iter().all(|arg| !arg.contains("ssh -tt"))
+        }));
+        assert!(plan.commands.iter().any(|command| {
             command.phase == Phase::AwaitInstaller
                 && command.argv.iter().all(|arg| !arg.contains("ssh -tt"))
         }));
@@ -1102,10 +1104,10 @@ mod tests {
         }));
         assert!(plan.commands.iter().any(|command| {
             command.phase == Phase::NixosInstall
-                && command
-                    .argv
-                    .iter()
-                    .any(|arg| arg.contains("nixos-install --root /mnt --system"))
+                && command.argv.iter().any(|arg| {
+                    arg.contains("nixos-install --root /mnt --system")
+                        && arg.contains("--no-channel-copy")
+                })
         }));
         assert!(!plan
             .commands

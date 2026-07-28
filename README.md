@@ -40,7 +40,9 @@ mutating remote commands can allocate a TTY.
 For private flakes or hosts that should not build in the installer, build the
 system closure locally and pass `--system /nix/store/...-nixos-system-host`.
 `nixos-kexec` then asks `disk-nix` to mount the target, copies the closure into
-the mounted target store, and runs `nixos-install --system`.
+the mounted target store, and runs `nixos-install --system --no-channel-copy`.
+That avoids reading channel state from the installer media after the target
+system closure has already been staged.
 
 When `--kexec-kernel` points inside a NixOS kexec tree, `nixos-kexec` reads the
 kernel command line from the sibling `kexec-boot` script. For non-NixOS kexec
@@ -52,7 +54,8 @@ See [examples](./examples/) for end-to-end command flows and sample
 `disk-nix` install specs. The examples include `kexec-installer.nix`, which can
 build a kexec installer tree with SSH, NetworkManager, redistributable firmware,
 explicit Intel Wi-Fi module loading, `disk-nix`, ZFS, partitioning tools, and
-hardware diagnostics available.
+hardware diagnostics available. It accepts optional NetworkManager profiles for
+targets that must rejoin Wi-Fi after kexec.
 
 Render a plan:
 
@@ -102,6 +105,9 @@ nixos-kexec run root@192.0.2.10 \
   --disk-spec ./disk-nix-install.json \
   --kexec-kernel ./bzImage \
   --kexec-initrd ./initrd.gz \
+  --ssh-option BatchMode=yes \
+  --ssh-option IdentitiesOnly=yes \
+  --ssh-option IdentityFile=/home/me/.ssh/id_ed25519 \
   --ssh-tty \
   --execute
 ```
