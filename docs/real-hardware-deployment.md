@@ -29,23 +29,21 @@ The installer environment that is kexec'd on the target needs:
 
 ## Build A Kexec Installer
 
-`examples/kexec-installer.nix` builds a NixOS kexec tree with SSH,
-NetworkManager, redistributable firmware, Intel Wi-Fi modules, `disk-nix`, ZFS,
-partitioning tools, and hardware diagnostics.
+`nixos-kexec installer` builds a NixOS kexec tree with SSH, NetworkManager,
+redistributable firmware, Intel Wi-Fi modules, `disk-nix`, ZFS, partitioning
+tools, and hardware diagnostics.
 
 ```sh
-nix build --impure --expr '
-let
-  nixpkgs = builtins.getFlake "github:NixOS/nixpkgs/nixos-unstable";
-  disk-nix = builtins.getFlake "github:hermetic-foundation/disk-nix";
-  installer = import ./examples/kexec-installer.nix {
-    inherit disk-nix nixpkgs;
-    authorizedKeys = [ (builtins.readFile /home/me/.ssh/id_ed25519.pub) ];
-    system = "x86_64-linux";
-  };
-in
-installer.config.system.build.kexecTree
-'
+nixos-kexec installer plan \
+  --authorized-key-file ~/.ssh/id_ed25519.pub \
+  --network-manager-profiles-json ./network-profiles.json \
+  --out-link ./result
+
+nixos-kexec installer build \
+  --authorized-key-file ~/.ssh/id_ed25519.pub \
+  --network-manager-profiles-json ./network-profiles.json \
+  --out-link ./result \
+  --execute
 ```
 
 The result contains:
@@ -57,6 +55,44 @@ The result contains:
 When `--kexec-kernel` points at `result/bzImage`, `nixos-kexec` reads the
 kernel command line from the sibling `kexec-boot` script. Pass
 `--kexec-append` only for non-NixOS kexec artifacts or custom command lines.
+
+`installer plan` prints the exact Nix build command and expression without
+running it. `installer build` refuses to run unless `--execute` is present.
+Authorized keys are runtime inputs to the installer artifact; they are not tied
+to the target host SSH key, which may not exist before first install.
+
+For Wi-Fi-only targets, pass a NetworkManager profiles JSON file:
+
+```json
+{
+  "home-wifi": {
+    "connection": {
+      "id": "home-wifi",
+      "type": "wifi",
+      "autoconnect": true
+    },
+    "wifi": {
+      "mode": "infrastructure",
+      "ssid": "home-wifi"
+    },
+    "wifi-security": {
+      "key-mgmt": "wpa-psk",
+      "psk": "change-me",
+      "psk-flags": 0
+    },
+    "ipv4": {
+      "method": "auto"
+    },
+    "ipv6": {
+      "method": "auto"
+    }
+  }
+}
+```
+
+This embeds the profile into the installer tree. For small lab networks that may
+be acceptable; for sensitive networks, build the installer artifact on trusted
+storage and handle the profile as an operational secret.
 
 ## Build Or Generate The Disk Spec
 

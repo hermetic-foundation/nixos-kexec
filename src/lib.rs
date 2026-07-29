@@ -3,7 +3,7 @@ use std::{
     io::{self, Write},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -14,6 +14,9 @@ use thiserror::Error;
 const DEFAULT_TARGET_ROOT: &str = "/mnt";
 const DEFAULT_REMOTE_WORKDIR: &str = "/tmp/nixos-kexec";
 const DEFAULT_DISK_NIX: &str = "github:hermetic-foundation/disk-nix#disk-nix";
+const DEFAULT_DISK_NIX_FLAKE: &str = "github:hermetic-foundation/disk-nix";
+const DEFAULT_NIXOS_KEXEC_FLAKE: &str = "github:hermetic-foundation/nixos-kexec";
+const DEFAULT_NIXPKGS_FLAKE: &str = "github:NixOS/nixpkgs/nixos-unstable";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -34,6 +37,8 @@ enum CommandKind {
     Script(SshCommand),
     /// Execute the generated local orchestration script.
     Run(SshRunCommand),
+    /// Build or render commands for the upstream kexec installer tree.
+    Installer(InstallerCommand),
     /// Generate shell completions.
     Completions { shell: Shell },
 }
@@ -45,6 +50,60 @@ pub struct SshRunCommand {
     /// Actually run the generated local orchestration script.
     #[arg(long)]
     execute: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum InstallerAction {
+    /// Render the Nix build command for the installer tree.
+    Plan(InstallerBuildCommand),
+    /// Build the installer tree. Refuses to run without --execute.
+    Build(InstallerRunCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct InstallerCommand {
+    #[command(subcommand)]
+    action: InstallerAction,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct InstallerRunCommand {
+    #[command(flatten)]
+    build: InstallerBuildCommand,
+    /// Actually run the generated Nix build command.
+    #[arg(long)]
+    execute: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct InstallerBuildCommand {
+    /// SSH authorized_keys public key file. Can be passed more than once.
+    #[arg(long = "authorized-key-file", value_name = "PATH")]
+    authorized_key_files: Vec<PathBuf>,
+    /// Literal SSH public key. Can be passed more than once.
+    #[arg(long = "authorized-key", value_name = "KEY")]
+    authorized_keys: Vec<String>,
+    /// JSON file containing NetworkManager profiles for the installer tree.
+    #[arg(long = "network-manager-profiles-json", value_name = "PATH")]
+    network_manager_profiles_json: Option<PathBuf>,
+    /// Target system for the installer tree.
+    #[arg(long, default_value = "x86_64-linux")]
+    system: String,
+    /// Flake containing examples/kexec-installer.nix.
+    #[arg(long, default_value = DEFAULT_NIXOS_KEXEC_FLAKE)]
+    nixos_kexec_flake: String,
+    /// disk-nix flake used by the installer tree.
+    #[arg(long, default_value = DEFAULT_DISK_NIX_FLAKE)]
+    disk_nix_flake: String,
+    /// nixpkgs flake used by the installer tree.
+    #[arg(long, default_value = DEFAULT_NIXPKGS_FLAKE)]
+    nixpkgs_flake: String,
+    /// Create or update this result symlink.
+    #[arg(long, value_name = "PATH")]
+    out_link: Option<PathBuf>,
+    /// Emit JSON instead of human-readable output.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -139,6 +198,21 @@ pub struct DeploymentPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct InstallerBuildPlan {
+    pub system: String,
+    pub nixos_kexec_flake: String,
+    pub disk_nix_flake: String,
+    pub nixpkgs_flake: String,
+    pub authorized_key_count: usize,
+    pub network_manager_profiles_json: Option<String>,
+    pub out_link: Option<String>,
+    pub argv: Vec<String>,
+    pub expression: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlanCommand {
     pub phase: Phase,
     pub argv: Vec<String>,
@@ -188,6 +262,39 @@ pub fn run(cli: Cli, output: &mut impl Write) -> Result<(), AppError> {
                 )));
             }
         }
+        CommandKind::Installer(command) => match command.action {
+            InstallerAction::Plan(command) => {
+                let plan = build_installer_plan(&command)?;
+                if command.json {
+                    writeln!(output, "{}", serde_json::to_string_pretty(&plan)?)?;
+                } else {
+                    print_installer_plan(output, &plan)?;
+                }
+            }
+            InstallerAction::Build(command) => {
+                if !command.execute {
+                    return Err(AppError::Message(
+                        "installer build refuses to run without --execute; use `nixos-kexec installer plan` for review"
+                            .to_string(),
+                    ));
+                }
+                let plan = build_installer_plan(&command.build)?;
+                if command.build.json {
+                    writeln!(output, "{}", serde_json::to_string_pretty(&plan)?)?;
+                } else {
+                    print_installer_plan(output, &plan)?;
+                }
+                let status = Command::new(&plan.argv[0])
+                    .args(&plan.argv[1..])
+                    .stdin(Stdio::null())
+                    .status()?;
+                if !status.success() {
+                    return Err(AppError::Message(format!(
+                        "installer build failed with status {status}"
+                    )));
+                }
+            }
+        },
         CommandKind::Completions { shell } => {
             let mut command = Cli::command();
             let name = command.get_name().to_string();
@@ -195,6 +302,63 @@ pub fn run(cli: Cli, output: &mut impl Write) -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+pub fn build_installer_plan(
+    command: &InstallerBuildCommand,
+) -> Result<InstallerBuildPlan, AppError> {
+    let authorized_keys = read_authorized_keys(command)?;
+    if authorized_keys.is_empty() {
+        return Err(AppError::Message(
+            "installer tree requires at least one --authorized-key-file or --authorized-key"
+                .to_string(),
+        ));
+    }
+    if command.system.trim().is_empty() {
+        return Err(AppError::Message(
+            "installer system cannot be empty".to_string(),
+        ));
+    }
+    if let Some(path) = &command.network_manager_profiles_json {
+        require_file("NetworkManager profiles JSON", path)?;
+    }
+
+    let expression = installer_expression(command, &authorized_keys);
+    let mut argv = vec![
+        "nix".to_string(),
+        "build".to_string(),
+        "--impure".to_string(),
+        "--expr".to_string(),
+        expression.clone(),
+    ];
+    if let Some(out_link) = &command.out_link {
+        argv.push("--out-link".to_string());
+        argv.push(out_link.display().to_string());
+    }
+
+    Ok(InstallerBuildPlan {
+        system: command.system.clone(),
+        nixos_kexec_flake: command.nixos_kexec_flake.clone(),
+        disk_nix_flake: command.disk_nix_flake.clone(),
+        nixpkgs_flake: command.nixpkgs_flake.clone(),
+        authorized_key_count: authorized_keys.len(),
+        network_manager_profiles_json: command
+            .network_manager_profiles_json
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        out_link: command
+            .out_link
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        argv,
+        expression,
+        warnings: vec![
+            "installer builds are local; pass the current SSH target only to plan/script/run"
+                .to_string(),
+            "review authorized keys and any NetworkManager profile embedded in the installer tree"
+                .to_string(),
+        ],
+    })
 }
 
 pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
@@ -477,6 +641,30 @@ fn print_plan(output: &mut impl Write, plan: &DeploymentPlan) -> Result<(), AppE
     Ok(())
 }
 
+fn print_installer_plan(
+    output: &mut impl Write,
+    plan: &InstallerBuildPlan,
+) -> Result<(), AppError> {
+    writeln!(output, "installer system: {}", plan.system)?;
+    writeln!(output, "nixos-kexec flake: {}", plan.nixos_kexec_flake)?;
+    writeln!(output, "disk-nix flake: {}", plan.disk_nix_flake)?;
+    writeln!(output, "nixpkgs flake: {}", plan.nixpkgs_flake)?;
+    writeln!(output, "authorized keys: {}", plan.authorized_key_count)?;
+    if let Some(path) = &plan.network_manager_profiles_json {
+        writeln!(output, "NetworkManager profiles JSON: {path}")?;
+    }
+    if let Some(out_link) = &plan.out_link {
+        writeln!(output, "out link: {out_link}")?;
+    }
+    writeln!(output)?;
+    for warning in &plan.warnings {
+        writeln!(output, "warning: {warning}")?;
+    }
+    writeln!(output)?;
+    writeln!(output, "{}", shell_command(&plan.argv))?;
+    Ok(())
+}
+
 fn write_or_print_script(
     output: &mut impl Write,
     path: Option<&Path>,
@@ -514,6 +702,79 @@ fn require_existing_path(name: &str, path: &Path) -> Result<(), AppError> {
             path.display()
         )))
     }
+}
+
+fn read_authorized_keys(command: &InstallerBuildCommand) -> Result<Vec<String>, AppError> {
+    let mut keys = Vec::new();
+    keys.extend(command.authorized_keys.iter().cloned());
+    for path in &command.authorized_key_files {
+        let content = fs::read_to_string(path).map_err(|error| {
+            AppError::Message(format!(
+                "could not read authorized key file {}: {error}",
+                path.display()
+            ))
+        })?;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                keys.push(trimmed.to_string());
+            }
+        }
+    }
+    Ok(keys)
+}
+
+fn installer_expression(command: &InstallerBuildCommand, authorized_keys: &[String]) -> String {
+    format!(
+        r#"let
+  nixosKexec = builtins.getFlake {nixos_kexec};
+  nixpkgs = builtins.getFlake {nixpkgs};
+  disk-nix = builtins.getFlake {disk_nix};
+  installer = import (nixosKexec + "/examples/kexec-installer.nix") {{
+    inherit disk-nix nixpkgs;
+    authorizedKeys = {authorized_keys};
+    networkManagerProfiles = {network_manager_profiles};
+    system = {system};
+  }};
+in
+installer.config.system.build.kexecTree"#,
+        nixos_kexec = nix_string(&command.nixos_kexec_flake),
+        nixpkgs = nix_string(&command.nixpkgs_flake),
+        disk_nix = nix_string(&command.disk_nix_flake),
+        authorized_keys = nix_list(authorized_keys),
+        network_manager_profiles = installer_network_manager_profiles(command),
+        system = nix_string(&command.system),
+    )
+}
+
+fn installer_network_manager_profiles(command: &InstallerBuildCommand) -> String {
+    command
+        .network_manager_profiles_json
+        .as_ref()
+        .map(|path| {
+            format!(
+                "builtins.fromJSON (builtins.readFile {})",
+                nix_string(&path.display().to_string())
+            )
+        })
+        .unwrap_or_else(|| "{ }".to_string())
+}
+
+fn nix_list(values: &[String]) -> String {
+    let items = values
+        .iter()
+        .map(|value| nix_string(value))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("[ {items} ]")
+}
+
+fn nix_string(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace("${", "\\${");
+    format!("\"{escaped}\"")
 }
 
 fn ssh_command(
@@ -892,6 +1153,26 @@ mod tests {
         }
     }
 
+    fn fixture_installer_command(temp: &tempfile::TempDir) -> InstallerBuildCommand {
+        let key_file = temp.path().join("id_ed25519.pub");
+        fs::write(
+            &key_file,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest nixos-kexec-test\n",
+        )
+        .unwrap();
+        InstallerBuildCommand {
+            authorized_key_files: vec![key_file],
+            authorized_keys: vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDirect direct".to_string()],
+            network_manager_profiles_json: None,
+            system: "x86_64-linux".to_string(),
+            nixos_kexec_flake: DEFAULT_NIXOS_KEXEC_FLAKE.to_string(),
+            disk_nix_flake: DEFAULT_DISK_NIX_FLAKE.to_string(),
+            nixpkgs_flake: DEFAULT_NIXPKGS_FLAKE.to_string(),
+            out_link: Some(temp.path().join("installer-result")),
+            json: false,
+        }
+    }
+
     #[test]
     fn ssh_plan_contains_kexec_disk_nix_install_and_reboot_phases() {
         let temp = tempfile::tempdir().unwrap();
@@ -1115,5 +1396,66 @@ mod tests {
             .commands
             .iter()
             .any(|command| command.argv.iter().any(|arg| arg.contains("install nixos"))));
+    }
+
+    #[test]
+    fn installer_plan_builds_reviewable_nix_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let command = fixture_installer_command(&temp);
+
+        let plan = build_installer_plan(&command).unwrap();
+
+        assert_eq!(plan.authorized_key_count, 2);
+        assert_eq!(plan.argv[0], "nix");
+        assert!(plan.argv.iter().any(|arg| arg == "--impure"));
+        assert!(plan
+            .argv
+            .iter()
+            .any(|arg| arg == &temp.path().join("installer-result").display().to_string()));
+        assert!(plan.expression.contains("examples/kexec-installer.nix"));
+        assert!(plan.expression.contains("networkManagerProfiles = { };"));
+        assert!(plan
+            .expression
+            .contains("github:hermetic-foundation/disk-nix"));
+        assert!(plan
+            .expression
+            .contains("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest"));
+    }
+
+    #[test]
+    fn installer_plan_can_load_network_manager_profiles_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let profiles = temp.path().join("profiles.json");
+        fs::write(&profiles, r#"{"home":{"connection":{"id":"home"}}}"#).unwrap();
+        let mut command = fixture_installer_command(&temp);
+        command.network_manager_profiles_json = Some(profiles.clone());
+
+        let plan = build_installer_plan(&command).unwrap();
+
+        assert_eq!(
+            plan.network_manager_profiles_json,
+            Some(profiles.display().to_string())
+        );
+        assert!(plan
+            .expression
+            .contains("networkManagerProfiles = builtins.fromJSON"));
+        assert!(plan.expression.contains(&profiles.display().to_string()));
+    }
+
+    #[test]
+    fn installer_plan_requires_authorized_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = fixture_installer_command(&temp);
+        command.authorized_key_files = Vec::new();
+        command.authorized_keys = Vec::new();
+
+        let error = build_installer_plan(&command).unwrap_err().to_string();
+
+        assert!(error.contains("requires at least one --authorized-key-file or --authorized-key"));
+    }
+
+    #[test]
+    fn nix_string_escapes_interpolation_and_quotes() {
+        assert_eq!(nix_string(r#"a"b${c}\"#), r#""a\"b\${c}\\""#);
     }
 }

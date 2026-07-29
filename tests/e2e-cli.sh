@@ -12,6 +12,9 @@ kernel="$tmpdir/bzImage"
 initrd="$tmpdir/initrd"
 script="$tmpdir/nixos-kexec.sh"
 plan_json="$tmpdir/plan.json"
+installer_plan_json="$tmpdir/installer-plan.json"
+authorized_key="$tmpdir/id_ed25519.pub"
+network_profiles="$tmpdir/network-profiles.json"
 
 printf '{"version":1,"apply":{"mode":"install"}}\n' >"$spec"
 mkdir -p "$flake_source"
@@ -19,6 +22,8 @@ mkdir -p "$system"
 printf '{}\n' >"$flake_source/flake.nix"
 printf 'kernel\n' >"$kernel"
 printf 'initrd\n' >"$initrd"
+printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest nixos-kexec-test\n' >"$authorized_key"
+printf '{"home":{"connection":{"id":"home","type":"wifi"}}}\n' >"$network_profiles"
 cat >"$tmpdir/kexec-boot" <<'EOF'
 #!/usr/bin/env bash
 kexec --load ./bzImage \
@@ -28,6 +33,38 @@ EOF
 
 "$bin" --help | grep -F 'Deploy NixOS through kexec with disk-nix storage management' >/dev/null
 "$bin" completions bash | grep -F 'nixos-kexec' >/dev/null
+
+"$bin" installer plan \
+  --authorized-key-file "$authorized_key" \
+  --network-manager-profiles-json "$network_profiles" \
+  --out-link "$tmpdir/kexec-tree" \
+  --json >"$installer_plan_json"
+
+jq -e '
+  .system == "x86_64-linux"
+  and .authorizedKeyCount == 1
+  and .networkManagerProfilesJson == "'"$network_profiles"'"
+  and .outLink != null
+  and (.argv | any(. == "--impure"))
+  and (.expression | contains("examples/kexec-installer.nix"))
+  and (.expression | contains("builtins.fromJSON"))
+  and (.expression | contains("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest"))
+' "$installer_plan_json" >/dev/null
+
+if "$bin" installer build \
+  --authorized-key-file "$authorized_key" 2>"$tmpdir/installer-build-refusal.err"; then
+  echo "installer build without --execute unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -F 'installer build refuses to run without --execute' \
+  "$tmpdir/installer-build-refusal.err" >/dev/null
+
+if "$bin" installer plan 2>"$tmpdir/installer-key-refusal.err"; then
+  echo "installer plan without an authorized key unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -F 'requires at least one --authorized-key-file or --authorized-key' \
+  "$tmpdir/installer-key-refusal.err" >/dev/null
 
 if [ -n "${NIXOS_KEXEC_EXAMPLES_DIR:-}" ]; then
   "${NIXOS_KEXEC_BASH:-bash}" -n "$NIXOS_KEXEC_EXAMPLES_DIR/install-from-template.sh"

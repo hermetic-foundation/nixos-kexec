@@ -28,34 +28,16 @@ console, then pass it as `TARGET=root@<current-address>`.
 Build a kexec installer tree with your SSH public key:
 
 ```sh
-nix build --impure --expr '
-let
-  nixpkgs = builtins.getFlake "github:NixOS/nixpkgs/nixos-unstable";
-  disk-nix = builtins.getFlake "github:hermetic-foundation/disk-nix";
-  installer = import ./examples/kexec-installer.nix {
-    inherit disk-nix nixpkgs;
-    authorizedKeys = [ (builtins.readFile /home/me/.ssh/id_ed25519.pub) ];
-    networkManagerProfiles.home-wifi = {
-      connection = {
-        id = "home-wifi";
-        type = "wifi";
-      };
-      wifi = {
-        mode = "infrastructure";
-        ssid = "home-wifi";
-      };
-      wifi-security = {
-        key-mgmt = "wpa-psk";
-        psk = "change-me";
-      };
-      ipv4.method = "auto";
-      ipv6.method = "auto";
-    };
-    system = "x86_64-linux";
-  };
-in
-installer.config.system.build.kexecTree
-'
+nixos-kexec installer plan \
+  --authorized-key-file ~/.ssh/id_ed25519.pub \
+  --network-manager-profiles-json ./network-profiles.json \
+  --out-link ./result
+
+nixos-kexec installer build \
+  --authorized-key-file ~/.ssh/id_ed25519.pub \
+  --network-manager-profiles-json ./network-profiles.json \
+  --out-link ./result \
+  --execute
 ```
 
 Run the plan first:

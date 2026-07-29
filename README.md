@@ -10,8 +10,8 @@ agent-based frontends can be added later without changing the core phases.
 ## Status
 
 This repository currently provides an initial CLI that renders and can execute a
-reviewable SSH orchestration script. It expects you to supply the kexec kernel
-and initrd artifacts for the installer environment.
+reviewable SSH orchestration script. It can also render or build the upstream
+kexec installer tree used by that script.
 
 The local machine running `nixos-kexec` must have `ssh`, `scp`, and `timeout`
 available.
@@ -61,6 +61,21 @@ Use [Real hardware deployment](./docs/real-hardware-deployment.md) for the full
 operator workflow. That guide covers dynamic target addresses, local/private
 flake staging, locally built system closures, disk-nix install specs, encrypted
 ZFS prompts, and post-install verification.
+
+Build the upstream kexec installer tree:
+
+```sh
+nixos-kexec installer plan \
+  --authorized-key-file ~/.ssh/id_ed25519.pub \
+  --network-manager-profiles-json ./network-profiles.json \
+  --out-link ./result
+
+nixos-kexec installer build \
+  --authorized-key-file ~/.ssh/id_ed25519.pub \
+  --network-manager-profiles-json ./network-profiles.json \
+  --out-link ./result \
+  --execute
+```
 
 Render a plan:
 
