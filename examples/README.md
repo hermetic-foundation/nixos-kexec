@@ -21,6 +21,10 @@ installer handoff and replace all placeholder paths before executing anything.
 
 ## Review Flow
 
+The SSH target is always runtime state. Do not bake DHCP addresses into a host
+flake or disk spec. Discover the current address from DHCP, mDNS, DNS, ARP, or a
+console, then pass it as `TARGET=root@<current-address>`.
+
 Build a kexec installer tree with your SSH public key:
 
 ```sh

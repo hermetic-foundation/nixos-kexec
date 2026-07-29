@@ -57,6 +57,11 @@ explicit Intel Wi-Fi module loading, `disk-nix`, ZFS, partitioning tools, and
 hardware diagnostics available. It accepts optional NetworkManager profiles for
 targets that must rejoin Wi-Fi after kexec.
 
+Use [Real hardware deployment](./docs/real-hardware-deployment.md) for the full
+operator workflow. That guide covers dynamic target addresses, local/private
+flake staging, locally built system closures, disk-nix install specs, encrypted
+ZFS prompts, and post-install verification.
+
 Render a plan:
 
 ```sh
