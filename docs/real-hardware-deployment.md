@@ -152,6 +152,16 @@ nixos-kexec run "$target" \
 `keylocation=prompt`, because the remote ZFS command must be able to prompt for
 the passphrase.
 
+The plan should report this install strategy:
+
+```text
+install strategy: installer evaluates the flake and builds or downloads the target system closure
+```
+
+In this mode `nixos-kexec` does not copy the NixOS system closure from the
+operator machine. The installer must be able to fetch the flake and build or
+substitute the target system.
+
 ## Local Or Private Flake Flow
 
 Use `--flake-source` when the flake path is local or private. `nixos-kexec`
@@ -173,6 +183,16 @@ nixos-kexec run "$target" \
 
 The `--flake` value still needs the host fragment. The path before the fragment
 is used to determine the staged installable inside the remote installer.
+
+The plan should report this install strategy:
+
+```text
+install strategy: nixos-kexec uploads local flake source; installer builds or downloads the target system closure
+```
+
+Do not combine `--flake-source` with `--system`. Those are different install
+strategies: one asks the installer to build from source, and the other copies a
+prebuilt system closure after `disk-nix` mounts the target.
 
 ## Prebuilt System Closure Flow
 
@@ -204,6 +224,18 @@ nixos-kexec run "$target" \
 With `--system`, `nixos-kexec` asks `disk-nix` to mount the target, copies the
 local closure into the target store with `nix copy --no-check-sigs`, and runs
 `nixos-install --system ... --no-channel-copy`.
+
+The plan should report this install strategy:
+
+```text
+install strategy: nixos-kexec copies a prebuilt system closure into the mounted target store
+```
+
+This is the only mode where `nixos-kexec` copies the full target system closure.
+If that closure contains a large personal desktop or development environment,
+the copy can still be large; it happens after kexec and after storage has been
+mounted by `disk-nix`, not as a direct `nixos-rebuild --target-host` switch into
+the currently running system.
 
 ## Review And Safety
 

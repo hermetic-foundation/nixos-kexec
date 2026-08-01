@@ -50,6 +50,12 @@ nixos-kexec plan root@192.0.2.10 \
   --kexec-initrd ./initrd
 ```
 
+Read the `install strategy:` line before running anything. A normal public
+flake install lets the installer build or substitute the target system. A
+`--flake-source` install uploads local source after kexec, but still builds or
+substitutes in the installer. A `--system` install copies the prebuilt closure
+into the mounted target store after `disk-nix` has prepared storage.
+
 Render a script for review:
 
 ```sh

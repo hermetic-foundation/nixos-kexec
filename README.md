@@ -37,6 +37,18 @@ still include the target host fragment, such as `path:/home/me/flake#host`.
 For encrypted storage specs that prompt for a passphrase, pass `--ssh-tty` so
 mutating remote commands can allocate a TTY.
 
+`nixos-kexec` is an install orchestrator, not a replacement spelling for
+`nixos-rebuild --target-host`. A deployment must enter the kexec installer,
+apply the uploaded `disk-nix` spec, and then install into the mounted target.
+The plan output names the install strategy so operators can see where the
+target system closure will come from before anything mutates:
+
+- installer evaluates the flake and builds or downloads the target system
+- `--flake-source` uploads a local flake, then the installer builds or downloads
+  the target system
+- `--system` copies a prebuilt closure into the mounted target store, then runs
+  `nixos-install --system`
+
 For private flakes or hosts that should not build in the installer, build the
 system closure locally and pass `--system /nix/store/...-nixos-system-host`.
 `nixos-kexec` then asks `disk-nix` to mount the target, copies the closure into
