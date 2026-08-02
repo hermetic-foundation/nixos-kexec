@@ -27,6 +27,53 @@ The installer environment that is kexec'd on the target needs:
 - storage tools required by the spec, such as ZFS, parted, dosfstools, or
   util-linux
 
+## Bootstrap Host Identity
+
+Some NixOS configurations decrypt secrets during activation with the target
+host SSH key, for example through agenix age recipients based on
+`/etc/ssh/ssh_host_ed25519_key`. On a first install that key may not exist yet.
+
+Use `--host-key` when the installed system needs a stable host identity before
+`nixos-install` runs:
+
+```sh
+ssh-keygen -t ed25519 \
+  -f ~/.ssh/host-keys/host/ssh_host_ed25519_key \
+  -C 'root@host bootstrap host key' \
+  -N ''
+
+# Add ~/.ssh/host-keys/host/ssh_host_ed25519_key.pub to your age recipients,
+# then rekey secrets before deploying.
+```
+
+During deployment, pass the private key path:
+
+```sh
+nixos-kexec run "$target" \
+  --flake github:you/flake#host \
+  --host-key ~/.ssh/host-keys/host/ssh_host_ed25519_key \
+  --disk-spec ./disk-nix-install.json \
+  --kexec-kernel ./result/bzImage \
+  --kexec-initrd ./result/initrd.gz \
+  --ssh-tty \
+  --execute
+```
+
+`nixos-kexec` copies the key over SSH after `disk-nix install mount`, installs
+it as `/etc/ssh/ssh_host_ed25519_key` under the mounted target with mode `0600`,
+installs the public key if available, removes the temporary remote copy, and
+then runs `nixos-install`.
+
+This is host identity provisioning. The private key is not part of the flake,
+the installer image, or the Nix store. The deployment is authorized by whoever
+holds that private host key, so store it in an encrypted password manager or
+backup if future installs should not depend on a single operator machine.
+
+If you do not want any deployer to hold the final host key, generate the key in
+the live environment, copy only the public key back to your flake, rekey
+secrets, and deploy with that private key still on the target. That avoids
+off-target private-key custody but adds an interactive preflight step.
+
 ## Build A Kexec Installer
 
 `nixos-kexec installer` builds a NixOS kexec tree with SSH, NetworkManager,

@@ -141,6 +141,18 @@ pub struct SshCommand {
     /// Preinstalled disk-nix-compatible command to run instead of `nix run`.
     #[arg(long, value_name = "COMMAND")]
     disk_nix_command: Option<String>,
+    /// Local private SSH host key to install into the target before nixos-install.
+    ///
+    /// The key is copied over SSH at deploy time and installed as
+    /// /etc/ssh/ssh_host_ed25519_key under the target root. Keep this file
+    /// outside the flake source and outside the Nix store.
+    #[arg(long, value_name = "PATH")]
+    host_key: Option<PathBuf>,
+    /// Local public SSH host key to install next to --host-key.
+    ///
+    /// If omitted and <host-key>.pub exists, that file is used automatically.
+    #[arg(long, value_name = "PATH")]
+    host_key_public: Option<PathBuf>,
     /// Mount target passed to disk-nix install nixos.
     #[arg(long, default_value = DEFAULT_TARGET_ROOT)]
     target_root: String,
@@ -174,6 +186,7 @@ pub enum Phase {
     StageInstall,
     DiskNixApply,
     CopySystem,
+    StageHostIdentity,
     NixosInstall,
     Reboot,
 }
@@ -191,6 +204,8 @@ pub struct DeploymentPlan {
     pub disk_spec: String,
     pub disk_nix: String,
     pub disk_nix_command: Option<String>,
+    pub host_key: Option<String>,
+    pub host_key_public: Option<String>,
     pub ssh_tty: bool,
     pub target_root: String,
     pub remote_workdir: String,
@@ -396,6 +411,15 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
     if let Some(system) = &command.system {
         require_existing_path("system closure", system)?;
     }
+    if command.host_key.is_none() && command.host_key_public.is_some() {
+        return Err(AppError::Message(
+            "--host-key-public requires --host-key".to_string(),
+        ));
+    }
+    if let Some(host_key) = &command.host_key {
+        require_file("host key", host_key)?;
+    }
+    let host_key_public = effective_host_key_public(command)?;
     if command.system.is_some() && command.flake_source.is_some() {
         return Err(AppError::Message(
             "--system and --flake-source select different install strategies; use --system for a prebuilt closure or --flake-source for installer-side flake install"
@@ -530,6 +554,7 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
                 )
             ),
         ));
+        commands.extend(host_identity_commands(command, host_key_public.as_deref()));
         commands.push(copy_system_command(command, system));
         commands.push(ssh_command(
             command,
@@ -540,6 +565,40 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
                 "set -euo pipefail; nixos-install --root {} --system {} --no-root-passwd --no-channel-copy",
                 shell_quote(&command.target_root),
                 shell_quote(&system.display().to_string())
+            ),
+        ));
+    } else if command.host_key.is_some() {
+        commands.push(ssh_command(
+            command,
+            Phase::NixosInstall,
+            "mount target storage through disk-nix",
+            true,
+            format!(
+                "set -euo pipefail; {}",
+                disk_nix_invocation(
+                    command,
+                    &[
+                        "install".to_string(),
+                        "mount".to_string(),
+                        "--spec".to_string(),
+                        remote_spec.clone(),
+                        "--target".to_string(),
+                        command.target_root.clone(),
+                        "--execute".to_string(),
+                    ]
+                )
+            ),
+        ));
+        commands.extend(host_identity_commands(command, host_key_public.as_deref()));
+        commands.push(ssh_command(
+            command,
+            Phase::NixosInstall,
+            "install NixOS flake after provisioning host identity",
+            true,
+            format!(
+                "set -euo pipefail; nixos-install --root {} --flake {} --no-root-passwd --no-channel-copy",
+                shell_quote(&command.target_root),
+                shell_quote(&install_flake)
             ),
         ));
     } else {
@@ -577,6 +636,22 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
         ));
     }
 
+    let mut warnings = vec![
+        "kexec replaces the running kernel immediately; keep console or power access available"
+            .to_string(),
+        "disk-nix apply and nixos-install are destructive when the install spec formats disks"
+            .to_string(),
+        "the kexec installer environment must boot with SSH, Nix, kexec-tools, and network access"
+            .to_string(),
+        install_strategy_warning(install_strategy).to_string(),
+    ];
+    if command.host_key.is_some() {
+        warnings.push(
+            "host keys passed with --host-key are deploy-time secrets; keep private keys outside flakes and the Nix store"
+                .to_string(),
+        );
+    }
+
     Ok(DeploymentPlan {
         target: command.target.clone(),
         flake: command.flake.clone(),
@@ -587,20 +662,23 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             .flake_source
             .as_ref()
             .map(|path| path.display().to_string()),
-        system: command.system.as_ref().map(|path| path.display().to_string()),
+        system: command
+            .system
+            .as_ref()
+            .map(|path| path.display().to_string()),
         disk_spec: command.disk_spec.display().to_string(),
         disk_nix: command.disk_nix.clone(),
         disk_nix_command: command.disk_nix_command.clone(),
+        host_key: command
+            .host_key
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        host_key_public: host_key_public.map(|path| path.display().to_string()),
         ssh_tty: command.ssh_tty,
         target_root: command.target_root.clone(),
         remote_workdir: command.remote_workdir.clone(),
         commands,
-        warnings: vec![
-            "kexec replaces the running kernel immediately; keep console or power access available".to_string(),
-            "disk-nix apply and nixos-install are destructive when the install spec formats disks".to_string(),
-            "the kexec installer environment must boot with SSH, Nix, kexec-tools, and network access".to_string(),
-            install_strategy_warning(install_strategy).to_string(),
-        ],
+        warnings,
     })
 }
 
@@ -648,6 +726,12 @@ fn print_plan(output: &mut impl Write, plan: &DeploymentPlan) -> Result<(), AppE
     writeln!(output, "disk-nix: {}", plan.disk_nix)?;
     if let Some(command) = &plan.disk_nix_command {
         writeln!(output, "disk-nix command: {command}")?;
+    }
+    if let Some(host_key) = &plan.host_key {
+        writeln!(output, "host key: {host_key}")?;
+    }
+    if let Some(host_key_public) = &plan.host_key_public {
+        writeln!(output, "host key public: {host_key_public}")?;
     }
     writeln!(output)?;
     for warning in &plan.warnings {
@@ -960,6 +1044,127 @@ fn stage_flake_source_command(
     )
 }
 
+fn effective_host_key_public(command: &SshCommand) -> Result<Option<PathBuf>, AppError> {
+    if let Some(path) = &command.host_key_public {
+        require_file("host public key", path)?;
+        return Ok(Some(path.clone()));
+    }
+    let Some(host_key) = &command.host_key else {
+        return Ok(None);
+    };
+    let public_key = append_pub_suffix(host_key);
+    if public_key.is_file() {
+        Ok(Some(public_key))
+    } else {
+        Ok(None)
+    }
+}
+
+fn append_pub_suffix(path: &Path) -> PathBuf {
+    let mut public_key = path.as_os_str().to_os_string();
+    public_key.push(".pub");
+    PathBuf::from(public_key)
+}
+
+fn host_identity_commands(command: &SshCommand, public_key: Option<&Path>) -> Vec<PlanCommand> {
+    let Some(private_key) = &command.host_key else {
+        return Vec::new();
+    };
+
+    let remote_dir = format!("{}/host-identity", command.remote_workdir);
+    let remote_private_key = format!("{remote_dir}/ssh_host_ed25519_key");
+    let remote_public_key = format!("{remote_private_key}.pub");
+    let target_ssh_dir = format!("{}/etc/ssh", command.target_root);
+    let target_private_key = format!("{target_ssh_dir}/ssh_host_ed25519_key");
+    let target_public_key = format!("{target_private_key}.pub");
+
+    let mut commands = vec![upload_file_via_ssh_stdin_command(
+        command,
+        Phase::StageHostIdentity,
+        "upload private SSH host key into the installer workdir",
+        private_key,
+        &remote_private_key,
+        "0600",
+    )];
+
+    if let Some(public_key) = public_key {
+        commands.push(upload_file_via_ssh_stdin_command(
+            command,
+            Phase::StageHostIdentity,
+            "upload public SSH host key into the installer workdir",
+            public_key,
+            &remote_public_key,
+            "0644",
+        ));
+    }
+
+    let mut install_script = format!(
+        "set -euo pipefail; install -d -m 0755 {}; install -o root -g root -m 0600 {} {}",
+        shell_quote(&target_ssh_dir),
+        shell_quote(&remote_private_key),
+        shell_quote(&target_private_key)
+    );
+    if public_key.is_some() {
+        install_script.push_str(&format!(
+            "; install -o root -g root -m 0644 {} {}",
+            shell_quote(&remote_public_key),
+            shell_quote(&target_public_key)
+        ));
+    }
+    install_script.push_str(&format!("; rm -rf {}", shell_quote(&remote_dir)));
+    commands.push(ssh_command(
+        command,
+        Phase::StageHostIdentity,
+        "install SSH host key into the mounted target",
+        true,
+        install_script,
+    ));
+
+    commands
+}
+
+fn upload_file_via_ssh_stdin_command(
+    command: &SshCommand,
+    phase: Phase,
+    description: &str,
+    local_path: &Path,
+    remote_path: &str,
+    mode: &str,
+) -> PlanCommand {
+    let remote_dir = Path::new(remote_path)
+        .parent()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| ".".to_string());
+    let remote_script = format!(
+        "set -euo pipefail; umask 077; mkdir -p {}; cat > {}; chmod {} {}",
+        shell_quote(&remote_dir),
+        shell_quote(remote_path),
+        shell_quote(mode),
+        shell_quote(remote_path)
+    );
+    let ssh = shell_command(
+        &std::iter::once("ssh".to_string())
+            .chain(
+                command
+                    .ssh_options
+                    .iter()
+                    .flat_map(|option| ["-o".to_string(), option.clone()]),
+            )
+            .chain([command.target.clone(), remote_script])
+            .collect::<Vec<_>>(),
+    );
+    local_command(
+        phase,
+        description,
+        true,
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("{ssh} < {}", shell_quote(&local_path.display().to_string())),
+        ],
+    )
+}
+
 fn copy_system_command(command: &SshCommand, system: &Path) -> PlanCommand {
     let remote_store = format!("local?root={}", command.target_root);
     let store_uri = format!(
@@ -1210,6 +1415,8 @@ mod tests {
             kexec_append: Some("console=ttyS0".to_string()),
             disk_nix: DEFAULT_DISK_NIX.to_string(),
             disk_nix_command: None,
+            host_key: None,
+            host_key_public: None,
             ssh_tty: false,
             target_root: DEFAULT_TARGET_ROOT.to_string(),
             remote_workdir: DEFAULT_REMOTE_WORKDIR.to_string(),
@@ -1490,6 +1697,69 @@ mod tests {
             .commands
             .iter()
             .any(|command| command.argv.iter().any(|arg| arg.contains("install nixos"))));
+    }
+
+    #[test]
+    fn host_key_is_staged_after_mount_and_before_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let host_key = temp.path().join("ssh_host_ed25519_key");
+        fs::write(&host_key, "private-key").unwrap();
+        fs::write(append_pub_suffix(&host_key), "public-key").unwrap();
+        let mut command = fixture_command(&temp);
+        command.host_key = Some(host_key.clone());
+        command.no_final_reboot = true;
+
+        let plan = build_plan(&command).unwrap();
+
+        assert_eq!(plan.host_key, Some(host_key.display().to_string()));
+        assert_eq!(
+            plan.host_key_public,
+            Some(append_pub_suffix(&host_key).display().to_string())
+        );
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("deploy-time secrets")));
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::NixosInstall
+                && command.argv.iter().any(|arg| arg.contains("install mount"))
+        }));
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::StageHostIdentity
+                && command
+                    .argv
+                    .iter()
+                    .any(|arg| arg.contains("ssh_host_ed25519_key"))
+                && command.argv.iter().any(|arg| arg.contains("chmod 0600"))
+        }));
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::StageHostIdentity
+                && command.argv.iter().any(|arg| {
+                    arg.contains("install -o root -g root -m 0600")
+                        && arg.contains("/mnt/etc/ssh/ssh_host_ed25519_key")
+                        && arg.contains("rm -rf /tmp/nixos-kexec/host-identity")
+                })
+        }));
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::NixosInstall
+                && command.argv.iter().any(|arg| {
+                    arg.contains("nixos-install --root /mnt --flake")
+                        && arg.contains("github:example/flake#host")
+                })
+        }));
+    }
+
+    #[test]
+    fn host_key_public_requires_private_host_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let public_key = temp.path().join("ssh_host_ed25519_key.pub");
+        fs::write(&public_key, "public-key").unwrap();
+        let mut command = fixture_command(&temp);
+        command.host_key_public = Some(public_key);
+
+        let error = build_plan(&command).unwrap_err().to_string();
+
+        assert!(error.contains("--host-key-public requires --host-key"));
     }
 
     #[test]

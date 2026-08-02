@@ -15,6 +15,7 @@ plan_json="$tmpdir/plan.json"
 installer_plan_json="$tmpdir/installer-plan.json"
 authorized_key="$tmpdir/id_ed25519.pub"
 network_profiles="$tmpdir/network-profiles.json"
+host_key="$tmpdir/ssh_host_ed25519_key"
 
 printf '{"version":1,"apply":{"mode":"install"}}\n' >"$spec"
 mkdir -p "$flake_source"
@@ -24,6 +25,8 @@ printf 'kernel\n' >"$kernel"
 printf 'initrd\n' >"$initrd"
 printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest nixos-kexec-test\n' >"$authorized_key"
 printf '{"home":{"connection":{"id":"home","type":"wifi"}}}\n' >"$network_profiles"
+printf 'private-host-key\n' >"$host_key"
+printf 'public-host-key\n' >"$host_key.pub"
 cat >"$tmpdir/kexec-boot" <<'EOF'
 #!/usr/bin/env bash
 kexec --load ./bzImage \
@@ -155,6 +158,39 @@ jq -e --arg system "$system" '
   and (.commands | any(.phase == "nixos-install" and (.argv | any(contains("nixos-install --root /mnt --system") and contains("--no-channel-copy")))))
   and (.commands | all(.phase != "reboot"))
 ' "$plan_json" >/dev/null
+
+"$bin" plan root@192.0.2.10 \
+  --flake github:example/flake#host \
+  --host-key "$host_key" \
+  --disk-spec "$spec" \
+  --kexec-kernel "$kernel" \
+  --kexec-initrd "$initrd" \
+  --disk-nix-command /run/current-system/sw/bin/disk-nix \
+  --no-final-reboot \
+  --json >"$plan_json"
+
+jq -e --arg host_key "$host_key" --arg host_key_public "$host_key.pub" '
+  .hostKey == $host_key
+  and .hostKeyPublic == $host_key_public
+  and (.warnings | any(contains("deploy-time secrets")))
+  and (.commands | length == 12)
+  and (.commands | any(.phase == "nixos-install" and (.argv | any(contains("install mount")))))
+  and (.commands | any(.phase == "stage-host-identity" and (.argv | any(contains("chmod 0600") and contains("ssh_host_ed25519_key")))))
+  and (.commands | any(.phase == "stage-host-identity" and (.argv | any(contains("install -o root -g root -m 0600") and contains("/mnt/etc/ssh/ssh_host_ed25519_key")))))
+  and (.commands | any(.phase == "nixos-install" and (.argv | any(contains("nixos-install --root /mnt --flake") and contains("github:example/flake#host")))))
+  and (.commands | all(.phase != "reboot"))
+' "$plan_json" >/dev/null
+
+if "$bin" plan root@192.0.2.10 \
+  --flake github:example/flake#host \
+  --host-key-public "$host_key.pub" \
+  --disk-spec "$spec" \
+  --kexec-kernel "$kernel" \
+  --kexec-initrd "$initrd" 2>"$tmpdir/host-key-refusal.err"; then
+  echo "plan with --host-key-public and no --host-key unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -F -- '--host-key-public requires --host-key' "$tmpdir/host-key-refusal.err" >/dev/null
 
 if "$bin" run root@192.0.2.10 \
   --flake github:example/flake#host \

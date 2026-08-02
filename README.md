@@ -37,6 +37,17 @@ still include the target host fragment, such as `path:/home/me/flake#host`.
 For encrypted storage specs that prompt for a passphrase, pass `--ssh-tty` so
 mutating remote commands can allocate a TTY.
 
+For hosts that must decrypt first-boot secrets with their SSH host identity,
+pass `--host-key /path/to/ssh_host_ed25519_key`. `nixos-kexec` copies that
+private key over SSH after `disk-nix` has mounted the target and installs it as
+`/etc/ssh/ssh_host_ed25519_key` before `nixos-install` runs. If
+`<host-key>.pub` exists, it is installed next to the private key; otherwise pass
+`--host-key-public /path/to/ssh_host_ed25519_key.pub`.
+
+Host keys passed this way are deployment secrets. Keep them outside flake
+source, outside the Nix store, and in an encrypted backup or password manager if
+more than one trusted operator machine needs to perform installs.
+
 `nixos-kexec` is an install orchestrator, not a replacement spelling for
 `nixos-rebuild --target-host`. A deployment must enter the kexec installer,
 apply the uploaded `disk-nix` spec, and then install into the mounted target.
@@ -134,6 +145,7 @@ system="$(
 nixos-kexec run root@192.0.2.10 \
   --flake path:/home/me/flake#host \
   --system "$system" \
+  --host-key /home/me/host-keys/host/ssh_host_ed25519_key \
   --disk-spec ./disk-nix-install.json \
   --kexec-kernel ./bzImage \
   --kexec-initrd ./initrd.gz \
@@ -156,9 +168,9 @@ The generated workflow:
 5. Optionally uploads a local flake source.
 6. Uploads the `disk-nix` install spec.
 7. Runs `disk-nix apply --execute`.
-8. Runs `disk-nix install nixos --execute`, or with `--system`, runs
-   `disk-nix install mount`, copies the prebuilt closure, and runs
-   `nixos-install --system`.
+8. Runs `disk-nix install nixos --execute`, or splits the handoff when needed:
+   `disk-nix install mount`, optional host-key provisioning, optional closure
+   copy, then `nixos-install`.
 9. Reboots into the installed system.
 
 ## Safety

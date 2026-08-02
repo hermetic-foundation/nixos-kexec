@@ -56,6 +56,10 @@ flake install lets the installer build or substitute the target system. A
 substitutes in the installer. A `--system` install copies the prebuilt closure
 into the mounted target store after `disk-nix` has prepared storage.
 
+If first boot secrets use the target SSH host key as an age recipient, add
+`--host-key /path/to/ssh_host_ed25519_key`. Keep that private key outside the
+flake and back it up as an operational secret.
+
 Render a script for review:
 
 ```sh
@@ -92,6 +96,7 @@ system="$(
 nixos-kexec run root@192.0.2.10 \
   --flake path:/home/me/flake#host \
   --system "$system" \
+  --host-key /home/me/host-keys/host/ssh_host_ed25519_key \
   --disk-spec ./examples/specs/zfs-encrypted-root.by-id.json \
   --kexec-kernel ./result/bzImage \
   --kexec-initrd ./result/initrd.gz \
