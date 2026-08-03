@@ -1050,7 +1050,7 @@ fn disconnect_tolerant_ssh_command(
             "sh".to_string(),
             "-c".to_string(),
             format!(
-                "output=$({ssh} 2>&1); status=$?; printf '%s\\n' \"$output\"; if [ \"$status\" -eq 0 ]; then exit 0; fi; if [ \"$status\" -eq 255 ]; then case \"$output\" in *'nixos-kexec: entering kexec'*|*'Connection to '*' closed.'*) exit 0 ;; esac; fi; exit \"$status\""
+                "set +e; output=$({ssh} 2>&1); status=$?; set -e; printf '%s\\n' \"$output\"; if [ \"$status\" -eq 0 ]; then exit 0; fi; if [ \"$status\" -eq 255 ]; then case \"$output\" in *'nixos-kexec: entering kexec'*|*'Connection to '*' closed.'*) exit 0 ;; esac; fi; exit \"$status\""
             ),
         ],
     )
@@ -1803,6 +1803,7 @@ mod tests {
         assert!(script.contains("WARNING: no system closure is copied by nixos-kexec"));
         assert!(script.contains("ssh -o StrictHostKeyChecking=accept-new root@192.0.2.10"));
         assert!(script.contains("timeout 120s ssh"));
+        assert!(script.contains("set +e; output=$(timeout 120s ssh"));
         assert!(script.contains("while :; do if timeout 15s ssh"));
         assert!(script.contains("nix --extra-experimental-features"));
         assert!(script.contains("github:hermetic-foundation/disk-nix#disk-nix"));
