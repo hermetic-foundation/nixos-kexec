@@ -46,15 +46,18 @@ nixpkgs.lib.nixosSystem {
         boot = {
           initrd.availableKernelModules = [
             "cfg80211"
+            "e1000e"
             "mac80211"
             "iwlwifi"
             "iwldvm"
           ];
           initrd.kernelModules = [
+            "e1000e"
             "iwlwifi"
             "iwldvm"
           ];
           kernelModules = [
+            "e1000e"
             "iwlwifi"
             "iwldvm"
           ];
