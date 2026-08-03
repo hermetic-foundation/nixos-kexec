@@ -1287,7 +1287,7 @@ fn identity_environment_script(
             .unwrap_or_else(|| "".to_string())
     };
     format!(
-        "NIXOS_KEXEC_IDENTITY_HOST={identity_host}; export NIXOS_KEXEC_IDENTITY_HOST; NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE={public_key_file}; export NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE; if [ -n \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\" ] && [ -f \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\" ]; then NIXOS_KEXEC_SSH_PUBLIC_KEY=$(cat \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\"); else NIXOS_KEXEC_SSH_PUBLIC_KEY=''; fi; export NIXOS_KEXEC_SSH_PUBLIC_KEY; if [ -n \"$NIXOS_KEXEC_SSH_PUBLIC_KEY\" ] && command -v ssh-to-age >/dev/null 2>&1; then NIXOS_KEXEC_AGE_RECIPIENT=$(printf '%s\\n' \"$NIXOS_KEXEC_SSH_PUBLIC_KEY\" | ssh-to-age 2>/dev/null || true); else NIXOS_KEXEC_AGE_RECIPIENT=''; fi; export NIXOS_KEXEC_AGE_RECIPIENT",
+        "NIXOS_KEXEC_IDENTITY_HOST={identity_host}; export NIXOS_KEXEC_IDENTITY_HOST; NIXOS_KEXEC_IDENTITY_STATE_DIR=\"${{NIXOS_KEXEC_IDENTITY_STATE_DIR:-}}\"; export NIXOS_KEXEC_IDENTITY_STATE_DIR; NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE={public_key_file}; export NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE; if [ -n \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\" ] && [ -f \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\" ]; then NIXOS_KEXEC_SSH_PUBLIC_KEY=$(cat \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\"); else NIXOS_KEXEC_SSH_PUBLIC_KEY=''; fi; export NIXOS_KEXEC_SSH_PUBLIC_KEY; if [ -n \"$NIXOS_KEXEC_SSH_PUBLIC_KEY\" ] && command -v ssh-to-age >/dev/null 2>&1; then NIXOS_KEXEC_AGE_RECIPIENT=$(printf '%s\\n' \"$NIXOS_KEXEC_SSH_PUBLIC_KEY\" | ssh-to-age 2>/dev/null || true); else NIXOS_KEXEC_AGE_RECIPIENT=''; fi; export NIXOS_KEXEC_AGE_RECIPIENT",
         identity_host = shell_quote(identity_host.unwrap_or("")),
         public_key_file = public_key_file,
     )
@@ -2094,6 +2094,8 @@ mod tests {
         assert!(script.contains("ssh-keygen -q -t ed25519 -N ''"));
         assert!(script.contains("NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE=$NIXOS_KEXEC_HOST_KEY_PUBLIC"));
         assert!(script.contains("NIXOS_KEXEC_IDENTITY_STATE_DIR=\"$NIXOS_KEXEC_HOST_KEY_DIR\""));
+        assert!(script
+            .contains("NIXOS_KEXEC_IDENTITY_STATE_DIR=\"${NIXOS_KEXEC_IDENTITY_STATE_DIR:-}\""));
         assert!(script.contains("NIXOS_KEXEC_AGE_RECIPIENT"));
         assert!(script.contains("NIXOS_KEXEC_IDENTITY_HOOK_EVENT=apply"));
         assert!(script.contains("flake-os-add-age-recipient"));
@@ -2140,6 +2142,28 @@ mod tests {
             .unwrap();
 
         assert!(disarm_index < reboot_index);
+    }
+
+    #[test]
+    fn static_host_key_identity_hook_exports_state_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let host_key = temp.path().join("ssh_host_ed25519_key");
+        fs::write(&host_key, "private-key").unwrap();
+        fs::write(host_key.with_extension("pub"), "public-key").unwrap();
+        let mut command = fixture_command(&temp);
+        command.host_key = Some(host_key);
+        command.identity_hook = Some("bootstrap-machine-identity".to_string());
+        command.identity_rollback_hook = Some("bootstrap-machine-identity".to_string());
+
+        let plan = build_plan(&command).unwrap();
+        let script = render_script(&plan);
+
+        assert!(script.contains(
+            "NIXOS_KEXEC_IDENTITY_STATE_DIR=$(mktemp -d \"${TMPDIR:-/tmp}/nixos-kexec-identity."
+        ));
+        assert!(script
+            .contains("NIXOS_KEXEC_IDENTITY_STATE_DIR=\"${NIXOS_KEXEC_IDENTITY_STATE_DIR:-}\""));
+        assert!(script.contains("NIXOS_KEXEC_IDENTITY_HOOK_EVENT=rollback"));
     }
 
     #[test]
