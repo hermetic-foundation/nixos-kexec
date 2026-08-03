@@ -33,20 +33,31 @@ Some NixOS configurations decrypt secrets during activation with the target
 host SSH key, for example through agenix age recipients based on
 `/etc/ssh/ssh_host_ed25519_key`. On a first install that key may not exist yet.
 
-Use `--host-key` when the installed system needs a stable host identity before
-`nixos-install` runs:
+Use `--generate-host-key` when the installed system needs a host identity before
+`nixos-install` runs but the deployer should not keep a long-lived private key:
 
 ```sh
-ssh-keygen -t ed25519 \
-  -f ~/.ssh/host-keys/host/ssh_host_ed25519_key \
-  -C 'root@host bootstrap host key' \
-  -N ''
-
-# Add ~/.ssh/host-keys/host/ssh_host_ed25519_key.pub to your age recipients,
-# then rekey secrets before deploying.
+nixos-kexec run "$target" \
+  --flake path:/home/me/flake#host \
+  --flake-source /home/me/flake \
+  --generate-host-key \
+  --identity-hook 'nix run path:/home/me/flake#add-age-recipient' \
+  --disk-spec ./disk-nix-install.json \
+  --kexec-kernel ./result/bzImage \
+  --kexec-initrd ./result/initrd.gz \
+  --ssh-tty \
+  --execute
 ```
 
-During deployment, pass the private key path:
+`nixos-kexec` creates a temp Ed25519 key locally, exposes the public key and age
+recipient to the identity hook, stages the updated flake source, copies the
+private key into the mounted target as `/etc/ssh/ssh_host_ed25519_key`, verifies
+the installed key permissions, and removes the local temp key on success or
+failure. The hook must be idempotent because a failed deployment may leave the
+public recipient recorded while the private key was intentionally deleted.
+
+If you already manage a host key outside `nixos-kexec`, pass `--host-key`
+instead:
 
 ```sh
 nixos-kexec run "$target" \
@@ -59,20 +70,9 @@ nixos-kexec run "$target" \
   --execute
 ```
 
-`nixos-kexec` copies the key over SSH after `disk-nix install mount`, installs
-it as `/etc/ssh/ssh_host_ed25519_key` under the mounted target with mode `0600`,
-installs the public key if available, removes the temporary remote copy, and
-then runs `nixos-install`.
-
-This is host identity provisioning. The private key is not part of the flake,
-the installer image, or the Nix store. The deployment is authorized by whoever
-holds that private host key, so store it in an encrypted password manager or
-backup if future installs should not depend on a single operator machine.
-
-If you do not want any deployer to hold the final host key, generate the key in
-the live environment, copy only the public key back to your flake, rekey
-secrets, and deploy with that private key still on the target. That avoids
-off-target private-key custody but adds an interactive preflight step.
+Static host keys are deployment secrets. Keep them outside flake source and out
+of the Nix store. Prefer generated keys when the deployer only needs custody
+until the key is copied into the target.
 
 ## Build A Kexec Installer
 

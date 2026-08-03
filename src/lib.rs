@@ -17,6 +17,9 @@ const DEFAULT_DISK_NIX: &str = "github:hermetic-foundation/disk-nix#disk-nix";
 const DEFAULT_DISK_NIX_FLAKE: &str = "github:hermetic-foundation/disk-nix";
 const DEFAULT_NIXOS_KEXEC_FLAKE: &str = "github:hermetic-foundation/nixos-kexec";
 const DEFAULT_NIXPKGS_FLAKE: &str = "github:NixOS/nixpkgs/nixos-unstable";
+const GENERATED_HOST_KEY_VAR: &str = "$NIXOS_KEXEC_HOST_KEY";
+const GENERATED_HOST_KEY_PUBLIC_VAR: &str = "$NIXOS_KEXEC_HOST_KEY_PUBLIC";
+const RAW_SCRIPT_SENTINEL: &str = "__nixos_kexec_raw_script";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -153,6 +156,24 @@ pub struct SshCommand {
     /// If omitted and <host-key>.pub exists, that file is used automatically.
     #[arg(long, value_name = "PATH")]
     host_key_public: Option<PathBuf>,
+    /// Generate a temporary Ed25519 SSH host key and install it into the target.
+    ///
+    /// The local private key is created in a private temp directory and removed
+    /// by the generated orchestration script on success or failure.
+    #[arg(long)]
+    generate_host_key: bool,
+    /// Shell command to run after host identity material is available locally.
+    ///
+    /// The hook receives NIXOS_KEXEC_IDENTITY_HOST,
+    /// NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE, NIXOS_KEXEC_SSH_PUBLIC_KEY, and
+    /// NIXOS_KEXEC_AGE_RECIPIENT. It should be idempotent.
+    #[arg(long, value_name = "COMMAND")]
+    identity_hook: Option<String>,
+    /// Logical host name passed to --identity-hook.
+    ///
+    /// Defaults to the fragment in --flake when present.
+    #[arg(long, value_name = "HOST")]
+    identity_host: Option<String>,
     /// Mount target passed to disk-nix install nixos.
     #[arg(long, default_value = DEFAULT_TARGET_ROOT)]
     target_root: String,
@@ -206,6 +227,9 @@ pub struct DeploymentPlan {
     pub disk_nix_command: Option<String>,
     pub host_key: Option<String>,
     pub host_key_public: Option<String>,
+    pub generate_host_key: bool,
+    pub identity_hook: Option<String>,
+    pub identity_host: Option<String>,
     pub ssh_tty: bool,
     pub target_root: String,
     pub remote_workdir: String,
@@ -411,6 +435,11 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
     if let Some(system) = &command.system {
         require_existing_path("system closure", system)?;
     }
+    if command.host_key.is_some() && command.generate_host_key {
+        return Err(AppError::Message(
+            "--host-key and --generate-host-key are mutually exclusive".to_string(),
+        ));
+    }
     if command.host_key.is_none() && command.host_key_public.is_some() {
         return Err(AppError::Message(
             "--host-key-public requires --host-key".to_string(),
@@ -426,6 +455,18 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
                 .to_string(),
         ));
     }
+    if command.system.is_some() && command.identity_hook.is_some() {
+        return Err(AppError::Message(
+            "--identity-hook cannot update secrets inside an already built --system closure; run the hook before building --system or use --flake-source"
+                .to_string(),
+        ));
+    }
+    if command.identity_hook.is_some() && !has_host_identity(command) {
+        return Err(AppError::Message(
+            "--identity-hook requires --host-key or --generate-host-key".to_string(),
+        ));
+    }
+    let identity_host = effective_identity_host(command)?;
 
     let remote_spec = format!("{}/disk-nix-install.json", command.remote_workdir);
     let remote_kernel = format!("{}/kexec/kernel", command.remote_workdir);
@@ -437,6 +478,17 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
     let install_strategy_summary = install_strategy_summary(install_strategy);
     let mut commands = Vec::new();
 
+    if command.generate_host_key {
+        commands.push(generate_host_key_command(command, identity_host.as_deref()));
+    }
+    if let Some(hook) = &command.identity_hook {
+        commands.push(identity_hook_command(
+            command,
+            hook,
+            identity_host.as_deref(),
+            host_key_public.as_deref(),
+        ));
+    }
     commands.push(ssh_command(
         command,
         Phase::Preflight,
@@ -567,7 +619,7 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
                 shell_quote(&system.display().to_string())
             ),
         ));
-    } else if command.host_key.is_some() {
+    } else if has_host_identity(command) {
         commands.push(ssh_command(
             command,
             Phase::NixosInstall,
@@ -651,6 +703,18 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
                 .to_string(),
         );
     }
+    if command.generate_host_key {
+        warnings.push(
+            "generated host keys are temporary local secrets; the rendered script removes the local private key on success or failure"
+                .to_string(),
+        );
+    }
+    if command.identity_hook.is_some() {
+        warnings.push(
+            "identity hooks can mutate local secret metadata; hooks must be idempotent and should not print private key material"
+                .to_string(),
+        );
+    }
 
     Ok(DeploymentPlan {
         target: command.target.clone(),
@@ -674,6 +738,9 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             .as_ref()
             .map(|path| path.display().to_string()),
         host_key_public: host_key_public.map(|path| path.display().to_string()),
+        generate_host_key: command.generate_host_key,
+        identity_hook: command.identity_hook.clone(),
+        identity_host,
         ssh_tty: command.ssh_tty,
         target_root: command.target_root.clone(),
         remote_workdir: command.remote_workdir.clone(),
@@ -699,7 +766,7 @@ pub fn render_script(plan: &DeploymentPlan) -> String {
             "\n# {:?}: {}\n",
             command.phase, command.description
         ));
-        script.push_str(&shell_command(&command.argv));
+        script.push_str(&render_command(command));
         script.push('\n');
     }
     script
@@ -733,6 +800,15 @@ fn print_plan(output: &mut impl Write, plan: &DeploymentPlan) -> Result<(), AppE
     if let Some(host_key_public) = &plan.host_key_public {
         writeln!(output, "host key public: {host_key_public}")?;
     }
+    if plan.generate_host_key {
+        writeln!(output, "host key: generated temporary ed25519 key")?;
+    }
+    if let Some(identity_host) = &plan.identity_host {
+        writeln!(output, "identity host: {identity_host}")?;
+    }
+    if let Some(identity_hook) = &plan.identity_hook {
+        writeln!(output, "identity hook: {identity_hook}")?;
+    }
     writeln!(output)?;
     for warning in &plan.warnings {
         writeln!(output, "warning: {warning}")?;
@@ -749,7 +825,7 @@ fn print_plan(output: &mut impl Write, plan: &DeploymentPlan) -> Result<(), AppE
             "[{:?}] {mutates}: {}",
             command.phase, command.description
         )?;
-        writeln!(output, "  {}", shell_command(&command.argv))?;
+        writeln!(output, "  {}", render_command(command))?;
     }
     Ok(())
 }
@@ -1066,10 +1142,77 @@ fn append_pub_suffix(path: &Path) -> PathBuf {
     PathBuf::from(public_key)
 }
 
-fn host_identity_commands(command: &SshCommand, public_key: Option<&Path>) -> Vec<PlanCommand> {
-    let Some(private_key) = &command.host_key else {
-        return Vec::new();
+fn has_host_identity(command: &SshCommand) -> bool {
+    command.host_key.is_some() || command.generate_host_key
+}
+
+fn effective_identity_host(command: &SshCommand) -> Result<Option<String>, AppError> {
+    if let Some(host) = &command.identity_host {
+        let trimmed = host.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::Message(
+                "--identity-host cannot be empty".to_string(),
+            ));
+        }
+        return Ok(Some(trimmed.to_string()));
+    }
+    if command.identity_hook.is_none() && !command.generate_host_key {
+        return Ok(None);
+    }
+    Ok(command
+        .flake
+        .split_once('#')
+        .and_then(|(_, fragment)| (!fragment.is_empty()).then_some(fragment.to_string())))
+}
+
+fn generate_host_key_command(_command: &SshCommand, identity_host: Option<&str>) -> PlanCommand {
+    let comment = identity_host
+        .map(|host| format!("root@{host} bootstrap host key"))
+        .unwrap_or_else(|| "nixos-kexec bootstrap host key".to_string());
+    let script = format!(
+        "NIXOS_KEXEC_HOST_KEY_DIR=$(mktemp -d \"${{TMPDIR:-/tmp}}/nixos-kexec-host-key.XXXXXX\"); export NIXOS_KEXEC_HOST_KEY_DIR; chmod 700 \"$NIXOS_KEXEC_HOST_KEY_DIR\"; cleanup_nixos_kexec_host_key() {{ if [ -n \"${{NIXOS_KEXEC_HOST_KEY_DIR:-}}\" ]; then rm -rf -- \"$NIXOS_KEXEC_HOST_KEY_DIR\"; fi; }}; trap cleanup_nixos_kexec_host_key EXIT; NIXOS_KEXEC_HOST_KEY=\"$NIXOS_KEXEC_HOST_KEY_DIR/ssh_host_ed25519_key\"; NIXOS_KEXEC_HOST_KEY_PUBLIC=\"$NIXOS_KEXEC_HOST_KEY.pub\"; export NIXOS_KEXEC_HOST_KEY NIXOS_KEXEC_HOST_KEY_PUBLIC; ssh-keygen -q -t ed25519 -N '' -C {} -f \"$NIXOS_KEXEC_HOST_KEY\"; chmod 600 \"$NIXOS_KEXEC_HOST_KEY\"; chmod 644 \"$NIXOS_KEXEC_HOST_KEY_PUBLIC\"",
+        shell_quote(&comment)
+    );
+    local_command(
+        Phase::StageHostIdentity,
+        "generate temporary SSH host key for target install",
+        true,
+        raw_script_argv(script),
+    )
+}
+
+fn identity_hook_command(
+    command: &SshCommand,
+    hook: &str,
+    identity_host: Option<&str>,
+    static_public_key: Option<&Path>,
+) -> PlanCommand {
+    let public_key_file = if command.generate_host_key {
+        GENERATED_HOST_KEY_PUBLIC_VAR.to_string()
+    } else {
+        static_public_key
+            .map(|path| shell_quote(&path.display().to_string()))
+            .unwrap_or_else(|| "".to_string())
     };
+    let identity_host = identity_host.unwrap_or("");
+    let script = format!(
+        "set -euo pipefail; NIXOS_KEXEC_IDENTITY_HOST={identity_host}; export NIXOS_KEXEC_IDENTITY_HOST; NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE={public_key_file}; export NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE; if [ -n \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\" ] && [ -f \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\" ]; then NIXOS_KEXEC_SSH_PUBLIC_KEY=$(cat \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\"); else NIXOS_KEXEC_SSH_PUBLIC_KEY=''; fi; export NIXOS_KEXEC_SSH_PUBLIC_KEY; if [ -n \"$NIXOS_KEXEC_SSH_PUBLIC_KEY\" ] && command -v ssh-to-age >/dev/null 2>&1; then NIXOS_KEXEC_AGE_RECIPIENT=$(printf '%s\\n' \"$NIXOS_KEXEC_SSH_PUBLIC_KEY\" | ssh-to-age 2>/dev/null || true); else NIXOS_KEXEC_AGE_RECIPIENT=''; fi; export NIXOS_KEXEC_AGE_RECIPIENT; {hook}",
+        identity_host = shell_quote(identity_host),
+        public_key_file = public_key_file,
+        hook = hook,
+    );
+    local_command(
+        Phase::StageHostIdentity,
+        "run host identity hook",
+        true,
+        vec!["sh".to_string(), "-c".to_string(), script],
+    )
+}
+
+fn host_identity_commands(command: &SshCommand, public_key: Option<&Path>) -> Vec<PlanCommand> {
+    if !has_host_identity(command) {
+        return Vec::new();
+    }
 
     let remote_dir = format!("{}/host-identity", command.remote_workdir);
     let remote_private_key = format!("{remote_dir}/ssh_host_ed25519_key");
@@ -1078,24 +1221,43 @@ fn host_identity_commands(command: &SshCommand, public_key: Option<&Path>) -> Ve
     let target_private_key = format!("{target_ssh_dir}/ssh_host_ed25519_key");
     let target_public_key = format!("{target_private_key}.pub");
 
-    let mut commands = vec![upload_file_via_ssh_stdin_command(
-        command,
-        Phase::StageHostIdentity,
-        "upload private SSH host key into the installer workdir",
-        private_key,
-        &remote_private_key,
-        "0600",
-    )];
-
-    if let Some(public_key) = public_key {
-        commands.push(upload_file_via_ssh_stdin_command(
+    let mut commands = Vec::new();
+    if command.generate_host_key {
+        commands.push(upload_variable_file_via_ssh_stdin_command(
             command,
             Phase::StageHostIdentity,
-            "upload public SSH host key into the installer workdir",
-            public_key,
+            "upload generated private SSH host key into the installer workdir",
+            GENERATED_HOST_KEY_VAR,
+            &remote_private_key,
+            "0600",
+        ));
+        commands.push(upload_variable_file_via_ssh_stdin_command(
+            command,
+            Phase::StageHostIdentity,
+            "upload generated public SSH host key into the installer workdir",
+            GENERATED_HOST_KEY_PUBLIC_VAR,
             &remote_public_key,
             "0644",
         ));
+    } else if let Some(private_key) = &command.host_key {
+        commands.push(upload_file_via_ssh_stdin_command(
+            command,
+            Phase::StageHostIdentity,
+            "upload private SSH host key into the installer workdir",
+            private_key,
+            &remote_private_key,
+            "0600",
+        ));
+        if let Some(public_key) = public_key {
+            commands.push(upload_file_via_ssh_stdin_command(
+                command,
+                Phase::StageHostIdentity,
+                "upload public SSH host key into the installer workdir",
+                public_key,
+                &remote_public_key,
+                "0644",
+            ));
+        }
     }
 
     let mut install_script = format!(
@@ -1104,13 +1266,18 @@ fn host_identity_commands(command: &SshCommand, public_key: Option<&Path>) -> Ve
         shell_quote(&remote_private_key),
         shell_quote(&target_private_key)
     );
-    if public_key.is_some() {
+    if command.generate_host_key || public_key.is_some() {
         install_script.push_str(&format!(
             "; install -o root -g root -m 0644 {} {}",
             shell_quote(&remote_public_key),
             shell_quote(&target_public_key)
         ));
     }
+    install_script.push_str(&format!(
+        "; test \"$(stat -c '%a' {})\" = 600; test \"$(stat -c '%U:%G' {})\" = root:root",
+        shell_quote(&target_private_key),
+        shell_quote(&target_private_key)
+    ));
     install_script.push_str(&format!("; rm -rf {}", shell_quote(&remote_dir)));
     commands.push(ssh_command(
         command,
@@ -1165,6 +1332,48 @@ fn upload_file_via_ssh_stdin_command(
     )
 }
 
+fn upload_variable_file_via_ssh_stdin_command(
+    command: &SshCommand,
+    phase: Phase,
+    description: &str,
+    local_path_expr: &str,
+    remote_path: &str,
+    mode: &str,
+) -> PlanCommand {
+    let remote_dir = Path::new(remote_path)
+        .parent()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| ".".to_string());
+    let remote_script = format!(
+        "set -euo pipefail; umask 077; mkdir -p {}; cat > {}; chmod {} {}",
+        shell_quote(&remote_dir),
+        shell_quote(remote_path),
+        shell_quote(mode),
+        shell_quote(remote_path)
+    );
+    let ssh = shell_command(
+        &std::iter::once("ssh".to_string())
+            .chain(
+                command
+                    .ssh_options
+                    .iter()
+                    .flat_map(|option| ["-o".to_string(), option.clone()]),
+            )
+            .chain([command.target.clone(), remote_script])
+            .collect::<Vec<_>>(),
+    );
+    local_command(
+        phase,
+        description,
+        true,
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("{ssh} < \"{local_path_expr}\""),
+        ],
+    )
+}
+
 fn copy_system_command(command: &SshCommand, system: &Path) -> PlanCommand {
     let remote_store = format!("local?root={}", command.target_root);
     let store_uri = format!(
@@ -1202,6 +1411,22 @@ fn local_command(phase: Phase, description: &str, mutates: bool, argv: Vec<Strin
         argv,
         description: description.to_string(),
         mutates,
+    }
+}
+
+fn raw_script_argv(script: String) -> Vec<String> {
+    vec![RAW_SCRIPT_SENTINEL.to_string(), script]
+}
+
+fn render_command(command: &PlanCommand) -> String {
+    if command
+        .argv
+        .first()
+        .is_some_and(|arg| arg == RAW_SCRIPT_SENTINEL)
+    {
+        command.argv.get(1).cloned().unwrap_or_default()
+    } else {
+        shell_command(&command.argv)
     }
 }
 
@@ -1417,6 +1642,9 @@ mod tests {
             disk_nix_command: None,
             host_key: None,
             host_key_public: None,
+            generate_host_key: false,
+            identity_hook: None,
+            identity_host: None,
             ssh_tty: false,
             target_root: DEFAULT_TARGET_ROOT.to_string(),
             remote_workdir: DEFAULT_REMOTE_WORKDIR.to_string(),
@@ -1760,6 +1988,77 @@ mod tests {
         let error = build_plan(&command).unwrap_err().to_string();
 
         assert!(error.contains("--host-key-public requires --host-key"));
+    }
+
+    #[test]
+    fn generated_host_key_runs_hook_and_cleans_up_local_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = fixture_command(&temp);
+        command.generate_host_key = true;
+        command.identity_hook = Some("flake-os-add-age-recipient".to_string());
+        command.no_final_reboot = true;
+
+        let plan = build_plan(&command).unwrap();
+        let script = render_script(&plan);
+
+        assert!(plan.generate_host_key);
+        assert_eq!(plan.identity_host, Some("host".to_string()));
+        assert!(script.contains("mktemp -d \"${TMPDIR:-/tmp}/nixos-kexec-host-key."));
+        assert!(script.contains("trap cleanup_nixos_kexec_host_key EXIT"));
+        assert!(script.contains("ssh-keygen -q -t ed25519 -N ''"));
+        assert!(script.contains("NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE=$NIXOS_KEXEC_HOST_KEY_PUBLIC"));
+        assert!(script.contains("NIXOS_KEXEC_AGE_RECIPIENT"));
+        assert!(script.contains("flake-os-add-age-recipient"));
+        assert!(script.contains("< \"$NIXOS_KEXEC_HOST_KEY\""));
+        assert!(script.contains("< \"$NIXOS_KEXEC_HOST_KEY_PUBLIC\""));
+        assert!(script.contains("stat -c"));
+        assert!(script.contains("%a"));
+        assert!(script.contains("/mnt/etc/ssh/ssh_host_ed25519_key"));
+        assert!(script.contains("rm -rf -- \"$NIXOS_KEXEC_HOST_KEY_DIR\""));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("removes the local private key")));
+    }
+
+    #[test]
+    fn generated_host_key_conflicts_with_static_host_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let host_key = temp.path().join("ssh_host_ed25519_key");
+        fs::write(&host_key, "private-key").unwrap();
+        let mut command = fixture_command(&temp);
+        command.host_key = Some(host_key);
+        command.generate_host_key = true;
+
+        let error = build_plan(&command).unwrap_err().to_string();
+
+        assert!(error.contains("--host-key and --generate-host-key are mutually exclusive"));
+    }
+
+    #[test]
+    fn identity_hook_requires_host_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = fixture_command(&temp);
+        command.identity_hook = Some("flake-os-add-age-recipient".to_string());
+
+        let error = build_plan(&command).unwrap_err().to_string();
+
+        assert!(error.contains("--identity-hook requires --host-key or --generate-host-key"));
+    }
+
+    #[test]
+    fn identity_hook_rejects_prebuilt_system_ordering() {
+        let temp = tempfile::tempdir().unwrap();
+        let system = temp.path().join("system");
+        fs::create_dir(&system).unwrap();
+        let mut command = fixture_command(&temp);
+        command.system = Some(system);
+        command.generate_host_key = true;
+        command.identity_hook = Some("flake-os-add-age-recipient".to_string());
+
+        let error = build_plan(&command).unwrap_err().to_string();
+
+        assert!(error.contains("already built --system closure"));
     }
 
     #[test]

@@ -38,15 +38,23 @@ For encrypted storage specs that prompt for a passphrase, pass `--ssh-tty` so
 mutating remote commands can allocate a TTY.
 
 For hosts that must decrypt first-boot secrets with their SSH host identity,
-pass `--host-key /path/to/ssh_host_ed25519_key`. `nixos-kexec` copies that
-private key over SSH after `disk-nix` has mounted the target and installs it as
-`/etc/ssh/ssh_host_ed25519_key` before `nixos-install` runs. If
-`<host-key>.pub` exists, it is installed next to the private key; otherwise pass
-`--host-key-public /path/to/ssh_host_ed25519_key.pub`.
+pass `--host-key /path/to/ssh_host_ed25519_key` or `--generate-host-key`.
+Static keys are copied from the operator machine. Generated keys are created in
+a private temp directory, installed into the target, and removed locally on
+success or failure.
 
-Host keys passed this way are deployment secrets. Keep them outside flake
-source, outside the Nix store, and in an encrypted backup or password manager if
-more than one trusted operator machine needs to perform installs.
+Pass `--identity-hook <command>` when your flake needs to record the generated
+public key before `nixos-install`. The hook receives
+`NIXOS_KEXEC_IDENTITY_HOST`, `NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE`,
+`NIXOS_KEXEC_SSH_PUBLIC_KEY`, and `NIXOS_KEXEC_AGE_RECIPIENT` when
+`ssh-to-age` is available. The hook is generic so flakes can wire agenix,
+sops-nix, or another secret system without those conventions being baked into
+`nixos-kexec`.
+
+Generated keys and identity hooks should be used before the target system is
+built, such as with `--flake-source`. If you pass an already built `--system`,
+use a static `--host-key` or run your identity hook before building that
+closure.
 
 `nixos-kexec` is an install orchestrator, not a replacement spelling for
 `nixos-rebuild --target-host`. A deployment must enter the kexec installer,
