@@ -51,6 +51,14 @@ public key before `nixos-install`. The hook receives
 sops-nix, or another secret system without those conventions being baked into
 `nixos-kexec`.
 
+If the identity hook mutates external state, pass
+`--identity-rollback-hook <command>` too. The rollback hook runs only when the
+deployment script fails after the identity hook starts. It receives the same
+environment plus `NIXOS_KEXEC_IDENTITY_HOOK_EVENT=rollback`; the normal hook
+receives `NIXOS_KEXEC_IDENTITY_HOOK_EVENT=apply`. Hooks can use
+`NIXOS_KEXEC_IDENTITY_STATE_DIR` to record exactly which external resources were
+created by the current run.
+
 Generated keys and identity hooks should be used before the target system is
 built, such as with `--flake-source`. If you pass an already built `--system`,
 use a static `--host-key` or run your identity hook before building that

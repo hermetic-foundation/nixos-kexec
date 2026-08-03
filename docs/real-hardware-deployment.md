@@ -41,7 +41,8 @@ nixos-kexec run "$target" \
   --flake path:/home/me/flake#host \
   --flake-source /home/me/flake \
   --generate-host-key \
-  --identity-hook 'nix run path:/home/me/flake#add-age-recipient' \
+  --identity-hook 'nix run path:/home/me/flake#bootstrap-machine-identity' \
+  --identity-rollback-hook 'nix run path:/home/me/flake#bootstrap-machine-identity' \
   --disk-spec ./disk-nix-install.json \
   --kexec-kernel ./result/bzImage \
   --kexec-initrd ./result/initrd.gz \
@@ -53,8 +54,8 @@ nixos-kexec run "$target" \
 recipient to the identity hook, stages the updated flake source, copies the
 private key into the mounted target as `/etc/ssh/ssh_host_ed25519_key`, verifies
 the installed key permissions, and removes the local temp key on success or
-failure. The hook must be idempotent because a failed deployment may leave the
-public recipient recorded while the private key was intentionally deleted.
+failure. If deployment fails after the identity hook starts, the rollback hook
+runs before local temp state is deleted.
 
 If you already manage a host key outside `nixos-kexec`, pass `--host-key`
 instead:

@@ -169,6 +169,12 @@ pub struct SshCommand {
     /// NIXOS_KEXEC_AGE_RECIPIENT. It should be idempotent.
     #[arg(long, value_name = "COMMAND")]
     identity_hook: Option<String>,
+    /// Shell command to run if deployment fails after the identity hook starts.
+    ///
+    /// The rollback hook receives the same identity environment as
+    /// --identity-hook plus NIXOS_KEXEC_IDENTITY_HOOK_EVENT=rollback.
+    #[arg(long, value_name = "COMMAND")]
+    identity_rollback_hook: Option<String>,
     /// Logical host name passed to --identity-hook.
     ///
     /// Defaults to the fragment in --flake when present.
@@ -229,6 +235,7 @@ pub struct DeploymentPlan {
     pub host_key_public: Option<String>,
     pub generate_host_key: bool,
     pub identity_hook: Option<String>,
+    pub identity_rollback_hook: Option<String>,
     pub identity_host: Option<String>,
     pub ssh_tty: bool,
     pub target_root: String,
@@ -466,6 +473,11 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             "--identity-hook requires --host-key or --generate-host-key".to_string(),
         ));
     }
+    if command.identity_rollback_hook.is_some() && command.identity_hook.is_none() {
+        return Err(AppError::Message(
+            "--identity-rollback-hook requires --identity-hook".to_string(),
+        ));
+    }
     let identity_host = effective_identity_host(command)?;
 
     let remote_spec = format!("{}/disk-nix-install.json", command.remote_workdir);
@@ -480,6 +492,16 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
 
     if command.generate_host_key {
         commands.push(generate_host_key_command(command, identity_host.as_deref()));
+    } else if command.identity_hook.is_some() {
+        commands.push(identity_state_command());
+    }
+    if let Some(rollback_hook) = &command.identity_rollback_hook {
+        commands.push(identity_rollback_trap_command(
+            command,
+            rollback_hook,
+            identity_host.as_deref(),
+            host_key_public.as_deref(),
+        ));
     }
     if let Some(hook) = &command.identity_hook {
         commands.push(identity_hook_command(
@@ -678,6 +700,9 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             ),
         ));
     }
+    if command.identity_rollback_hook.is_some() {
+        commands.push(disarm_identity_rollback_command());
+    }
     if !command.no_final_reboot {
         commands.push(ssh_command(
             command,
@@ -715,6 +740,12 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
                 .to_string(),
         );
     }
+    if command.identity_rollback_hook.is_some() {
+        warnings.push(
+            "identity rollback hooks run on deployment failure and should undo external side effects created by the identity hook"
+                .to_string(),
+        );
+    }
 
     Ok(DeploymentPlan {
         target: command.target.clone(),
@@ -740,6 +771,7 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
         host_key_public: host_key_public.map(|path| path.display().to_string()),
         generate_host_key: command.generate_host_key,
         identity_hook: command.identity_hook.clone(),
+        identity_rollback_hook: command.identity_rollback_hook.clone(),
         identity_host,
         ssh_tty: command.ssh_tty,
         target_root: command.target_root.clone(),
@@ -808,6 +840,9 @@ fn print_plan(output: &mut impl Write, plan: &DeploymentPlan) -> Result<(), AppE
     }
     if let Some(identity_hook) = &plan.identity_hook {
         writeln!(output, "identity hook: {identity_hook}")?;
+    }
+    if let Some(identity_rollback_hook) = &plan.identity_rollback_hook {
+        writeln!(output, "identity rollback hook: {identity_rollback_hook}")?;
     }
     writeln!(output)?;
     for warning in &plan.warnings {
@@ -1170,7 +1205,7 @@ fn generate_host_key_command(_command: &SshCommand, identity_host: Option<&str>)
         .map(|host| format!("root@{host} bootstrap host key"))
         .unwrap_or_else(|| "nixos-kexec bootstrap host key".to_string());
     let script = format!(
-        "NIXOS_KEXEC_HOST_KEY_DIR=$(mktemp -d \"${{TMPDIR:-/tmp}}/nixos-kexec-host-key.XXXXXX\"); export NIXOS_KEXEC_HOST_KEY_DIR; chmod 700 \"$NIXOS_KEXEC_HOST_KEY_DIR\"; cleanup_nixos_kexec_host_key() {{ if [ -n \"${{NIXOS_KEXEC_HOST_KEY_DIR:-}}\" ]; then rm -rf -- \"$NIXOS_KEXEC_HOST_KEY_DIR\"; fi; }}; trap cleanup_nixos_kexec_host_key EXIT; NIXOS_KEXEC_HOST_KEY=\"$NIXOS_KEXEC_HOST_KEY_DIR/ssh_host_ed25519_key\"; NIXOS_KEXEC_HOST_KEY_PUBLIC=\"$NIXOS_KEXEC_HOST_KEY.pub\"; export NIXOS_KEXEC_HOST_KEY NIXOS_KEXEC_HOST_KEY_PUBLIC; ssh-keygen -q -t ed25519 -N '' -C {} -f \"$NIXOS_KEXEC_HOST_KEY\"; chmod 600 \"$NIXOS_KEXEC_HOST_KEY\"; chmod 644 \"$NIXOS_KEXEC_HOST_KEY_PUBLIC\"",
+        "NIXOS_KEXEC_HOST_KEY_DIR=$(mktemp -d \"${{TMPDIR:-/tmp}}/nixos-kexec-host-key.XXXXXX\"); export NIXOS_KEXEC_HOST_KEY_DIR; NIXOS_KEXEC_IDENTITY_STATE_DIR=\"$NIXOS_KEXEC_HOST_KEY_DIR\"; export NIXOS_KEXEC_IDENTITY_STATE_DIR; chmod 700 \"$NIXOS_KEXEC_HOST_KEY_DIR\"; cleanup_nixos_kexec_host_key() {{ if [ -n \"${{NIXOS_KEXEC_HOST_KEY_DIR:-}}\" ]; then rm -rf -- \"$NIXOS_KEXEC_HOST_KEY_DIR\"; fi; }}; trap cleanup_nixos_kexec_host_key EXIT; NIXOS_KEXEC_HOST_KEY=\"$NIXOS_KEXEC_HOST_KEY_DIR/ssh_host_ed25519_key\"; NIXOS_KEXEC_HOST_KEY_PUBLIC=\"$NIXOS_KEXEC_HOST_KEY.pub\"; export NIXOS_KEXEC_HOST_KEY NIXOS_KEXEC_HOST_KEY_PUBLIC; ssh-keygen -q -t ed25519 -N '' -C {} -f \"$NIXOS_KEXEC_HOST_KEY\"; chmod 600 \"$NIXOS_KEXEC_HOST_KEY\"; chmod 644 \"$NIXOS_KEXEC_HOST_KEY_PUBLIC\"",
         shell_quote(&comment)
     );
     local_command(
@@ -1181,24 +1216,26 @@ fn generate_host_key_command(_command: &SshCommand, identity_host: Option<&str>)
     )
 }
 
+fn identity_state_command() -> PlanCommand {
+    local_command(
+        Phase::StageHostIdentity,
+        "create temporary identity hook state directory",
+        true,
+        raw_script_argv(
+            "NIXOS_KEXEC_IDENTITY_STATE_DIR=$(mktemp -d \"${TMPDIR:-/tmp}/nixos-kexec-identity.XXXXXX\"); export NIXOS_KEXEC_IDENTITY_STATE_DIR; chmod 700 \"$NIXOS_KEXEC_IDENTITY_STATE_DIR\"; cleanup_nixos_kexec_identity_state() { if [ -n \"${NIXOS_KEXEC_IDENTITY_STATE_DIR:-}\" ]; then rm -rf -- \"$NIXOS_KEXEC_IDENTITY_STATE_DIR\"; fi; }; trap cleanup_nixos_kexec_identity_state EXIT".to_string(),
+        ),
+    )
+}
+
 fn identity_hook_command(
     command: &SshCommand,
     hook: &str,
     identity_host: Option<&str>,
     static_public_key: Option<&Path>,
 ) -> PlanCommand {
-    let public_key_file = if command.generate_host_key {
-        GENERATED_HOST_KEY_PUBLIC_VAR.to_string()
-    } else {
-        static_public_key
-            .map(|path| shell_quote(&path.display().to_string()))
-            .unwrap_or_else(|| "".to_string())
-    };
-    let identity_host = identity_host.unwrap_or("");
     let script = format!(
-        "set -euo pipefail; NIXOS_KEXEC_IDENTITY_HOST={identity_host}; export NIXOS_KEXEC_IDENTITY_HOST; NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE={public_key_file}; export NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE; if [ -n \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\" ] && [ -f \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\" ]; then NIXOS_KEXEC_SSH_PUBLIC_KEY=$(cat \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\"); else NIXOS_KEXEC_SSH_PUBLIC_KEY=''; fi; export NIXOS_KEXEC_SSH_PUBLIC_KEY; if [ -n \"$NIXOS_KEXEC_SSH_PUBLIC_KEY\" ] && command -v ssh-to-age >/dev/null 2>&1; then NIXOS_KEXEC_AGE_RECIPIENT=$(printf '%s\\n' \"$NIXOS_KEXEC_SSH_PUBLIC_KEY\" | ssh-to-age 2>/dev/null || true); else NIXOS_KEXEC_AGE_RECIPIENT=''; fi; export NIXOS_KEXEC_AGE_RECIPIENT; {hook}",
-        identity_host = shell_quote(identity_host),
-        public_key_file = public_key_file,
+        "set -euo pipefail; {}; NIXOS_KEXEC_IDENTITY_HOOK_EVENT=apply; export NIXOS_KEXEC_IDENTITY_HOOK_EVENT; {hook}",
+        identity_environment_script(command, identity_host, static_public_key),
         hook = hook,
     );
     local_command(
@@ -1206,6 +1243,53 @@ fn identity_hook_command(
         "run host identity hook",
         true,
         vec!["sh".to_string(), "-c".to_string(), script],
+    )
+}
+
+fn identity_rollback_trap_command(
+    command: &SshCommand,
+    rollback_hook: &str,
+    identity_host: Option<&str>,
+    static_public_key: Option<&Path>,
+) -> PlanCommand {
+    let script = format!(
+        "set -euo pipefail; {}; nixos_kexec_identity_rollback() {{ status=$?; if [ \"$status\" -ne 0 ] && [ \"${{NIXOS_KEXEC_IDENTITY_ROLLBACK_ARMED:-0}}\" = 1 ]; then echo 'nixos-kexec: running identity rollback hook after deployment failure' >&2; NIXOS_KEXEC_IDENTITY_HOOK_EVENT=rollback; export NIXOS_KEXEC_IDENTITY_HOOK_EVENT; {rollback_hook} || echo 'nixos-kexec: identity rollback hook failed' >&2; fi; if command -v cleanup_nixos_kexec_host_key >/dev/null 2>&1; then cleanup_nixos_kexec_host_key; fi; if command -v cleanup_nixos_kexec_identity_state >/dev/null 2>&1; then cleanup_nixos_kexec_identity_state; fi; exit \"$status\"; }}; NIXOS_KEXEC_IDENTITY_ROLLBACK_ARMED=1; export NIXOS_KEXEC_IDENTITY_ROLLBACK_ARMED; trap nixos_kexec_identity_rollback EXIT",
+        identity_environment_script(command, identity_host, static_public_key),
+        rollback_hook = rollback_hook,
+    );
+    local_command(
+        Phase::StageHostIdentity,
+        "arm identity rollback hook",
+        true,
+        raw_script_argv(script),
+    )
+}
+
+fn disarm_identity_rollback_command() -> PlanCommand {
+    local_command(
+        Phase::StageHostIdentity,
+        "disarm identity rollback hook after successful deployment",
+        true,
+        raw_script_argv("NIXOS_KEXEC_IDENTITY_ROLLBACK_ARMED=0".to_string()),
+    )
+}
+
+fn identity_environment_script(
+    command: &SshCommand,
+    identity_host: Option<&str>,
+    static_public_key: Option<&Path>,
+) -> String {
+    let public_key_file = if command.generate_host_key {
+        GENERATED_HOST_KEY_PUBLIC_VAR.to_string()
+    } else {
+        static_public_key
+            .map(|path| shell_quote(&path.display().to_string()))
+            .unwrap_or_else(|| "".to_string())
+    };
+    format!(
+        "NIXOS_KEXEC_IDENTITY_HOST={identity_host}; export NIXOS_KEXEC_IDENTITY_HOST; NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE={public_key_file}; export NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE; if [ -n \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\" ] && [ -f \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\" ]; then NIXOS_KEXEC_SSH_PUBLIC_KEY=$(cat \"$NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE\"); else NIXOS_KEXEC_SSH_PUBLIC_KEY=''; fi; export NIXOS_KEXEC_SSH_PUBLIC_KEY; if [ -n \"$NIXOS_KEXEC_SSH_PUBLIC_KEY\" ] && command -v ssh-to-age >/dev/null 2>&1; then NIXOS_KEXEC_AGE_RECIPIENT=$(printf '%s\\n' \"$NIXOS_KEXEC_SSH_PUBLIC_KEY\" | ssh-to-age 2>/dev/null || true); else NIXOS_KEXEC_AGE_RECIPIENT=''; fi; export NIXOS_KEXEC_AGE_RECIPIENT",
+        identity_host = shell_quote(identity_host.unwrap_or("")),
+        public_key_file = public_key_file,
     )
 }
 
@@ -1644,6 +1728,7 @@ mod tests {
             host_key_public: None,
             generate_host_key: false,
             identity_hook: None,
+            identity_rollback_hook: None,
             identity_host: None,
             ssh_tty: false,
             target_root: DEFAULT_TARGET_ROOT.to_string(),
@@ -1996,6 +2081,7 @@ mod tests {
         let mut command = fixture_command(&temp);
         command.generate_host_key = true;
         command.identity_hook = Some("flake-os-add-age-recipient".to_string());
+        command.identity_rollback_hook = Some("flake-os-add-age-recipient".to_string());
         command.no_final_reboot = true;
 
         let plan = build_plan(&command).unwrap();
@@ -2007,8 +2093,14 @@ mod tests {
         assert!(script.contains("trap cleanup_nixos_kexec_host_key EXIT"));
         assert!(script.contains("ssh-keygen -q -t ed25519 -N ''"));
         assert!(script.contains("NIXOS_KEXEC_SSH_PUBLIC_KEY_FILE=$NIXOS_KEXEC_HOST_KEY_PUBLIC"));
+        assert!(script.contains("NIXOS_KEXEC_IDENTITY_STATE_DIR=\"$NIXOS_KEXEC_HOST_KEY_DIR\""));
         assert!(script.contains("NIXOS_KEXEC_AGE_RECIPIENT"));
+        assert!(script.contains("NIXOS_KEXEC_IDENTITY_HOOK_EVENT=apply"));
         assert!(script.contains("flake-os-add-age-recipient"));
+        assert!(script.contains("nixos_kexec_identity_rollback()"));
+        assert!(script.contains("NIXOS_KEXEC_IDENTITY_HOOK_EVENT=rollback"));
+        assert!(script.contains("NIXOS_KEXEC_IDENTITY_ROLLBACK_ARMED=0"));
+        assert!(script.contains("cleanup_nixos_kexec_host_key"));
         assert!(script.contains("< \"$NIXOS_KEXEC_HOST_KEY\""));
         assert!(script.contains("< \"$NIXOS_KEXEC_HOST_KEY_PUBLIC\""));
         assert!(script.contains("stat -c"));
@@ -2019,6 +2111,35 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("removes the local private key")));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("identity rollback hooks run")));
+    }
+
+    #[test]
+    fn identity_rollback_disarms_before_final_reboot() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = fixture_command(&temp);
+        command.generate_host_key = true;
+        command.identity_hook = Some("bootstrap-machine-identity".to_string());
+        command.identity_rollback_hook = Some("bootstrap-machine-identity".to_string());
+
+        let plan = build_plan(&command).unwrap();
+        let disarm_index = plan
+            .commands
+            .iter()
+            .position(|command| {
+                command.description == "disarm identity rollback hook after successful deployment"
+            })
+            .unwrap();
+        let reboot_index = plan
+            .commands
+            .iter()
+            .position(|command| command.phase == Phase::Reboot)
+            .unwrap();
+
+        assert!(disarm_index < reboot_index);
     }
 
     #[test]
@@ -2044,6 +2165,18 @@ mod tests {
         let error = build_plan(&command).unwrap_err().to_string();
 
         assert!(error.contains("--identity-hook requires --host-key or --generate-host-key"));
+    }
+
+    #[test]
+    fn identity_rollback_hook_requires_identity_hook() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = fixture_command(&temp);
+        command.generate_host_key = true;
+        command.identity_rollback_hook = Some("flake-os-add-age-recipient".to_string());
+
+        let error = build_plan(&command).unwrap_err().to_string();
+
+        assert!(error.contains("--identity-rollback-hook requires --identity-hook"));
     }
 
     #[test]
