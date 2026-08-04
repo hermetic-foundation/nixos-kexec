@@ -16,6 +16,7 @@ installer_plan_json="$tmpdir/installer-plan.json"
 authorized_key="$tmpdir/id_ed25519.pub"
 network_profiles="$tmpdir/network-profiles.json"
 host_key="$tmpdir/ssh_host_ed25519_key"
+known_hosts="$tmpdir/known_hosts"
 
 printf '{"version":1,"apply":{"mode":"install"}}\n' >"$spec"
 mkdir -p "$flake_source"
@@ -27,6 +28,7 @@ printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest nixos-kexec-test\n' >"$authori
 printf '{"home":{"connection":{"id":"home","type":"wifi"}}}\n' >"$network_profiles"
 printf 'private-host-key\n' >"$host_key"
 printf 'public-host-key\n' >"$host_key.pub"
+printf 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest\n' >"$known_hosts"
 cat >"$tmpdir/kexec-boot" <<'EOF'
 #!/usr/bin/env bash
 kexec --load ./bzImage \
@@ -169,6 +171,7 @@ jq -e --arg system "$system" '
 
 "$bin" plan root@192.0.2.10 \
   --flake github:example/flake#host \
+  --installer-known-hosts-file "$known_hosts" \
   --host-key "$host_key" \
   --disk-spec "$spec" \
   --kexec-kernel "$kernel" \
@@ -180,8 +183,11 @@ jq -e --arg system "$system" '
 jq -e --arg host_key "$host_key" --arg host_key_public "$host_key.pub" '
   .hostKey == $host_key
   and .hostKeyPublic == $host_key_public
+  and (.installerKnownHostsFiles | length == 1)
   and (.warnings | any(contains("deploy-time secrets")))
-  and (.commands | length == 12)
+  and (.commands | length == 14)
+  and (.commands | any(.phase == "stage-install" and (.argv | any(contains("installer-known-hosts-0")))))
+  and (.commands | any(.phase == "stage-install" and ((.argv | any(contains("/root/.ssh/known_hosts"))) and (.argv | any(contains("/etc/ssh/ssh_known_hosts"))))))
   and (.commands | any(.phase == "nixos-install" and (.argv | any(contains("install mount")))))
   and (.commands | any(.phase == "stage-host-identity" and (.argv | any(contains("chmod 0600") and contains("ssh_host_ed25519_key")))))
   and (.commands | any(.phase == "stage-host-identity" and (.argv | any(contains("install -o root -g root -m 0600") and contains("/mnt/etc/ssh/ssh_host_ed25519_key")))))

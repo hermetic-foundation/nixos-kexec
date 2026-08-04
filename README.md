@@ -35,6 +35,14 @@ For local or private flake directories, pass `--flake-source /path/to/flake`.
 handoff to use the staged path inside the installer. The `--flake` value must
 still include the target host fragment, such as `path:/home/me/flake#host`.
 
+For flakes that still need private `git+ssh` inputs during installer-side
+evaluation, pass `--installer-known-hosts-file ./known_hosts`. The file is
+uploaded after kexec and installed as `/root/.ssh/known_hosts` and
+`/etc/ssh/ssh_known_hosts` inside the installer before `disk-nix apply` or
+`nixos-install` can fetch flake inputs. SSH options passed with `--ssh-option`
+only affect the operator-to-target SSH connection; they do not configure Git's
+SSH trust inside the installer.
+
 For encrypted storage specs that prompt for a passphrase, pass `--ssh-tty` so
 mutating remote commands can allocate a TTY.
 
@@ -144,6 +152,7 @@ Run the orchestration only after reviewing the script:
 nixos-kexec run root@192.0.2.10 \
   --flake path:/home/me/flake#host \
   --flake-source /home/me/flake \
+  --installer-known-hosts-file /home/me/.ssh/known_hosts \
   --disk-spec ./disk-nix-install.json \
   --kexec-kernel ./bzImage \
   --kexec-initrd ./initrd \
@@ -183,12 +192,13 @@ The generated workflow:
 3. Loads and enters the kexec installer.
 4. Waits for SSH to return.
 5. Optionally uploads a local flake source.
-6. Uploads the `disk-nix` install spec.
-7. Runs `disk-nix apply --execute`.
-8. Runs `disk-nix install nixos --execute`, or splits the handoff when needed:
+6. Optionally installs SSH known-hosts entries for installer-side flake fetches.
+7. Uploads the `disk-nix` install spec.
+8. Runs `disk-nix apply --execute`.
+9. Runs `disk-nix install nixos --execute`, or splits the handoff when needed:
    `disk-nix install mount`, optional host-key provisioning, optional closure
    copy, then `nixos-install`.
-9. Reboots into the installed system.
+10. Reboots into the installed system.
 
 ## Safety
 

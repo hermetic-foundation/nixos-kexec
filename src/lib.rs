@@ -120,6 +120,13 @@ pub struct SshCommand {
     /// Local flake directory to upload into the installer before nixos-install.
     #[arg(long, value_name = "PATH")]
     flake_source: Option<PathBuf>,
+    /// SSH known_hosts file to install inside the kexec installer before flake evaluation.
+    ///
+    /// Pass this for private git+ssh flake inputs so Nix/Git inside the
+    /// installer can verify the Git server without an interactive prompt. Can
+    /// be passed more than once.
+    #[arg(long = "installer-known-hosts-file", value_name = "PATH")]
+    installer_known_hosts_files: Vec<PathBuf>,
     /// Prebuilt NixOS system closure to copy into the target and install.
     #[arg(long, value_name = "STORE_PATH")]
     system: Option<PathBuf>,
@@ -227,6 +234,7 @@ pub struct DeploymentPlan {
     pub install_strategy: InstallStrategy,
     pub install_strategy_summary: String,
     pub flake_source: Option<String>,
+    pub installer_known_hosts_files: Vec<String>,
     pub system: Option<String>,
     pub disk_spec: String,
     pub disk_nix: String,
@@ -439,6 +447,9 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             )));
         }
     }
+    for path in &command.installer_known_hosts_files {
+        require_file("installer known_hosts file", path)?;
+    }
     if let Some(system) = &command.system {
         require_existing_path("system closure", system)?;
     }
@@ -577,6 +588,7 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             &remote_flake_source,
         ));
     }
+    commands.extend(installer_known_hosts_commands(command));
     commands.push(scp_command(
         command,
         Phase::StageInstall,
@@ -757,6 +769,11 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             .flake_source
             .as_ref()
             .map(|path| path.display().to_string()),
+        installer_known_hosts_files: command
+            .installer_known_hosts_files
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
         system: command
             .system
             .as_ref()
@@ -817,6 +834,9 @@ fn print_plan(output: &mut impl Write, plan: &DeploymentPlan) -> Result<(), AppE
     )?;
     if let Some(source) = &plan.flake_source {
         writeln!(output, "flake source: {source}")?;
+    }
+    for path in &plan.installer_known_hosts_files {
+        writeln!(output, "installer known_hosts file: {path}")?;
     }
     if let Some(system) = &plan.system {
         writeln!(output, "system: {system}")?;
@@ -1153,6 +1173,61 @@ fn stage_flake_source_command(
             format!("{local} | {remote}"),
         ],
     )
+}
+
+fn installer_known_hosts_commands(command: &SshCommand) -> Vec<PlanCommand> {
+    if command.installer_known_hosts_files.is_empty() {
+        return Vec::new();
+    }
+
+    let remote_paths = command
+        .installer_known_hosts_files
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("{}/installer-known-hosts-{index}", command.remote_workdir))
+        .collect::<Vec<_>>();
+    let mut commands = command
+        .installer_known_hosts_files
+        .iter()
+        .zip(remote_paths.iter())
+        .map(|(local_path, remote_path)| {
+            upload_file_via_ssh_stdin_command(
+                command,
+                Phase::StageInstall,
+                "upload SSH known_hosts for installer-side flake fetches",
+                local_path,
+                remote_path,
+                "0644",
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let remote_known_hosts = format!("{}/installer-known-hosts", command.remote_workdir);
+    let remote_inputs = remote_paths
+        .iter()
+        .map(|path| shell_quote(path))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cleanup_paths = remote_paths
+        .iter()
+        .map(|path| shell_quote(path))
+        .chain([shell_quote(&remote_known_hosts)])
+        .collect::<Vec<_>>()
+        .join(" ");
+    commands.push(ssh_command(
+        command,
+        Phase::StageInstall,
+        "install SSH known_hosts into the kexec installer",
+        false,
+        format!(
+            "set -euo pipefail; install -d -m 0700 /root/.ssh; install -d -m 0755 /etc/ssh; cat {remote_inputs} > {}; install -o root -g root -m 0644 {} /root/.ssh/known_hosts; install -o root -g root -m 0644 {} /etc/ssh/ssh_known_hosts; rm -f {cleanup_paths}",
+            shell_quote(&remote_known_hosts),
+            shell_quote(&remote_known_hosts),
+            shell_quote(&remote_known_hosts),
+        ),
+    ));
+
+    commands
 }
 
 fn effective_host_key_public(command: &SshCommand) -> Result<Option<PathBuf>, AppError> {
@@ -1717,6 +1792,7 @@ mod tests {
             target: "root@192.0.2.10".to_string(),
             flake: "github:example/flake#host".to_string(),
             flake_source: None,
+            installer_known_hosts_files: Vec::new(),
             system: None,
             disk_spec,
             kexec_kernel: kernel,
@@ -1922,6 +1998,63 @@ mod tests {
         let error = build_plan(&command).unwrap_err().to_string();
 
         assert!(error.contains("requires --flake to include a #host fragment"));
+    }
+
+    #[test]
+    fn installer_known_hosts_are_staged_before_flake_fetches() {
+        let temp = tempfile::tempdir().unwrap();
+        let known_hosts = temp.path().join("known_hosts");
+        fs::write(
+            &known_hosts,
+            "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest\n",
+        )
+        .unwrap();
+        let mut command = fixture_command(&temp);
+        command.installer_known_hosts_files = vec![known_hosts.clone()];
+        command.no_final_reboot = true;
+
+        let plan = build_plan(&command).unwrap();
+        let script = render_script(&plan);
+
+        assert_eq!(
+            plan.installer_known_hosts_files,
+            vec![known_hosts.display().to_string()]
+        );
+        assert!(script.contains("installer-known-hosts-0"));
+        assert!(script.contains("/root/.ssh/known_hosts"));
+        assert!(script.contains("/etc/ssh/ssh_known_hosts"));
+
+        let known_hosts_index = plan
+            .commands
+            .iter()
+            .position(|command| {
+                command.description == "install SSH known_hosts into the kexec installer"
+            })
+            .unwrap();
+        let disk_apply_index = plan
+            .commands
+            .iter()
+            .position(|command| command.phase == Phase::DiskNixApply)
+            .unwrap();
+        let nixos_install_index = plan
+            .commands
+            .iter()
+            .position(|command| command.phase == Phase::NixosInstall)
+            .unwrap();
+
+        assert!(known_hosts_index < disk_apply_index);
+        assert!(known_hosts_index < nixos_install_index);
+    }
+
+    #[test]
+    fn installer_known_hosts_file_must_exist() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = fixture_command(&temp);
+        command.installer_known_hosts_files = vec![temp.path().join("missing-known-hosts")];
+
+        let error = build_plan(&command).unwrap_err().to_string();
+
+        assert!(error.contains("installer known_hosts file does not exist"));
     }
 
     #[test]
