@@ -544,7 +544,7 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
         "load and enter the staged kexec installer",
         true,
         format!(
-            "set -euo pipefail; kexec -l {} --initrd={} --append {}; echo 'nixos-kexec: entering kexec' >&2; sync; systemctl kexec || kexec -e",
+            "set -euo pipefail; kexec -l {} --initrd={} --append {}; echo 'nixos-kexec: entering kexec' >&2; sync; kexec -e",
             shell_quote(&remote_kernel),
             shell_quote(&remote_initrd),
             shell_quote(&kexec_append)
@@ -1050,7 +1050,7 @@ fn disconnect_tolerant_ssh_command(
             "sh".to_string(),
             "-c".to_string(),
             format!(
-                "set +e; output=$({ssh} 2>&1); status=$?; set -e; printf '%s\\n' \"$output\"; if [ \"$status\" -eq 0 ]; then exit 0; fi; if [ \"$status\" -eq 255 ]; then case \"$output\" in *'nixos-kexec: entering kexec'*|*'Connection to '*' closed.'*) exit 0 ;; esac; fi; exit \"$status\""
+                "set +e; output=$({ssh} 2>&1); status=$?; set -e; printf '%s\\n' \"$output\"; if [ \"$status\" -eq 0 ]; then exit 0; fi; if [ \"$status\" -eq 255 ] || [ \"$status\" -eq 124 ]; then case \"$output\" in *'nixos-kexec: entering kexec'*|*'Connection to '*' closed.'*) exit 0 ;; esac; fi; exit \"$status\""
             ),
         ],
     )
@@ -1774,6 +1774,11 @@ mod tests {
             command.phase == Phase::Kexec
                 && command.mutates
                 && command.argv.iter().any(|arg| arg.contains("kexec -l"))
+                && command.argv.iter().any(|arg| arg.contains("kexec -e"))
+                && !command
+                    .argv
+                    .iter()
+                    .any(|arg| arg.contains("systemctl kexec"))
         }));
         assert!(plan.commands.iter().any(|command| {
             command.phase == Phase::DiskNixApply
@@ -1804,7 +1809,10 @@ mod tests {
         assert!(script.contains("ssh -o StrictHostKeyChecking=accept-new root@192.0.2.10"));
         assert!(script.contains("timeout 120s ssh"));
         assert!(script.contains("set +e; output=$(timeout 120s ssh"));
+        assert!(script.contains("[ \"$status\" -eq 255 ] || [ \"$status\" -eq 124 ]"));
         assert!(script.contains("while :; do if timeout 15s ssh"));
+        assert!(script.contains("sync; kexec -e"));
+        assert!(!script.contains("systemctl kexec"));
         assert!(script.contains("nix --extra-experimental-features"));
         assert!(script.contains("github:hermetic-foundation/disk-nix#disk-nix"));
     }
