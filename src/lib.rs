@@ -522,6 +522,7 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             host_key_public.as_deref(),
         ));
     }
+    commands.push(detect_remote_installer_command(command));
     commands.push(ssh_command(
         command,
         Phase::Preflight,
@@ -539,7 +540,7 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
         ]
         .join("; "),
     ));
-    commands.push(scp_to_remote_paths_command(
+    commands.push(skip_when_already_installer(scp_to_remote_paths_command(
         command,
         Phase::StageKexec,
         "upload kexec kernel and initrd to the current host",
@@ -548,8 +549,8 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             (&command.kexec_kernel, &remote_kernel),
             (&command.kexec_initrd, &remote_initrd),
         ],
-    ));
-    commands.push(disconnect_tolerant_ssh_command(
+    )));
+    commands.push(skip_when_already_installer(disconnect_tolerant_ssh_command(
         command,
         Phase::Kexec,
         "load and enter the staged kexec installer",
@@ -560,8 +561,8 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             shell_quote(&remote_initrd),
             shell_quote(&kexec_append)
         ),
-    ));
-    commands.push(local_command(
+    )));
+    commands.push(skip_when_already_installer(local_command(
         Phase::AwaitInstaller,
         "wait for SSH to return after kexec",
         false,
@@ -570,7 +571,7 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             "-c".to_string(),
             await_ssh_script(command),
         ],
-    ));
+    )));
     commands.push(ssh_command(
         command,
         Phase::StageInstall,
@@ -1041,6 +1042,46 @@ fn ssh_command(
     argv.push(command.target.clone());
     argv.push(remote_script);
     local_command(phase, description, mutates, argv)
+}
+
+fn detect_remote_installer_command(command: &SshCommand) -> PlanCommand {
+    let remote_script =
+        "test -e /run/nixos-kexec-stage || test \"$(hostname)\" = nixos-kexec-installer"
+            .to_string();
+    let probe = shell_command(
+        &std::iter::once("ssh".to_string())
+            .chain(
+                command
+                    .ssh_options
+                    .iter()
+                    .flat_map(|option| ["-o".to_string(), option.clone()]),
+            )
+            .chain([command.target.clone(), remote_script])
+            .collect::<Vec<_>>(),
+    );
+    local_command(
+        Phase::Preflight,
+        "detect whether target is already in the kexec installer",
+        false,
+        raw_script_argv(format!(
+            "NIXOS_KEXEC_REMOTE_IS_INSTALLER=0; if {probe}; then NIXOS_KEXEC_REMOTE_IS_INSTALLER=1; echo 'nixos-kexec: target is already in the kexec installer; skipping kexec handoff' >&2; fi; export NIXOS_KEXEC_REMOTE_IS_INSTALLER"
+        )),
+    )
+}
+
+fn skip_when_already_installer(command: PlanCommand) -> PlanCommand {
+    let phase = command.phase;
+    let description = command.description.clone();
+    let mutates = command.mutates;
+    let rendered = render_command(&command);
+    local_command(
+        phase,
+        &description,
+        mutates,
+        raw_script_argv(format!(
+            "if [ \"${{NIXOS_KEXEC_REMOTE_IS_INSTALLER:-0}}\" = 1 ]; then echo 'nixos-kexec: already in installer; skipping {description}' >&2; else {rendered}; fi"
+        )),
+    )
 }
 
 fn disconnect_tolerant_ssh_command(
@@ -1841,7 +1882,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let plan = build_plan(&fixture_command(&temp)).unwrap();
 
-        assert_eq!(plan.commands.len(), 9);
+        assert_eq!(plan.commands.len(), 10);
         assert_eq!(plan.install_strategy, InstallStrategy::InstallerBuildsFlake);
         assert!(plan
             .install_strategy_summary
@@ -1883,6 +1924,8 @@ mod tests {
         assert!(script.contains("WARNING: kexec replaces the running kernel immediately"));
         assert!(script.contains("WARNING: no system closure is copied by nixos-kexec"));
         assert!(script.contains("ssh -o StrictHostKeyChecking=accept-new root@192.0.2.10"));
+        assert!(script.contains("NIXOS_KEXEC_REMOTE_IS_INSTALLER=0"));
+        assert!(script.contains("already in installer; skipping load and enter"));
         assert!(script.contains("timeout 120s ssh"));
         assert!(script.contains("set +e; output=$(timeout 120s ssh"));
         assert!(script.contains("[ \"$status\" -eq 255 ] || [ \"$status\" -eq 124 ]"));
@@ -1913,7 +1956,7 @@ mod tests {
 
         let plan = build_plan(&command).unwrap();
 
-        assert_eq!(plan.commands.len(), 8);
+        assert_eq!(plan.commands.len(), 9);
         assert_eq!(plan.commands.last().unwrap().phase, Phase::NixosInstall);
         assert!(plan.commands.iter().any(|command| {
             command.phase == Phase::DiskNixApply
