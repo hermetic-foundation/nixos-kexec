@@ -21,6 +21,7 @@ The installer environment must boot with:
 - SSH access for the same target address
 - enough network firmware and tooling for the target hardware
 - Nix with `nix-command` and flakes available
+- Git for flakes with `git`, `git+ssh`, or GitHub inputs
 - `kexec-tools`
 - network access to the NixOS flake, unless `--flake-source` stages it
 
@@ -92,9 +93,9 @@ artifacts, pass `--kexec-append` explicitly.
 See [examples](./examples/) for end-to-end command flows and sample
 `disk-nix` install specs. The examples include `kexec-installer.nix`, which can
 build a kexec installer tree with SSH, NetworkManager, redistributable firmware,
-explicit Intel Wi-Fi module loading, `disk-nix`, ZFS, partitioning tools, and
-hardware diagnostics available. It accepts optional NetworkManager profiles for
-targets that must rejoin Wi-Fi after kexec.
+explicit Intel Wi-Fi module loading, Git, `disk-nix`, ZFS, partitioning tools,
+and hardware diagnostics available. It accepts optional NetworkManager profiles
+for targets that must rejoin Wi-Fi after kexec.
 
 Use [Real hardware deployment](./docs/real-hardware-deployment.md) for the full
 operator workflow. That guide covers dynamic target addresses, local/private

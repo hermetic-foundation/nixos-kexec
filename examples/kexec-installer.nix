@@ -76,6 +76,7 @@ nixpkgs.lib.nixosSystem {
         environment.systemPackages = [
           disk-nix.packages.${system}.disk-nix
           pkgs.dosfstools
+          pkgs.gitMinimal
           pkgs.gnutar
           pkgs.iw
           pkgs.kexec-tools
