@@ -677,15 +677,20 @@ pub fn build_plan(command: &SshCommand) -> Result<DeploymentPlan, AppError> {
             ),
         ));
         commands.extend(host_identity_commands(command, host_key_public.as_deref()));
+        commands.extend(installer_git_identity_commands(
+            command,
+            host_key_public.as_deref(),
+        ));
         commands.push(ssh_command(
             command,
             Phase::NixosInstall,
             "install NixOS flake after provisioning host identity",
             true,
             format!(
-                "set -euo pipefail; nixos-install --root {} --flake {} --no-root-passwd --no-channel-copy",
+                "set -euo pipefail; {}; nixos-install --root {} --flake {} --no-root-passwd --no-channel-copy",
+                installer_git_identity_environment_script(),
                 shell_quote(&command.target_root),
-                shell_quote(&install_flake)
+                shell_quote(&install_flake),
             ),
         ));
     } else {
@@ -1490,6 +1495,75 @@ fn host_identity_commands(command: &SshCommand, public_key: Option<&Path>) -> Ve
     commands
 }
 
+fn installer_git_identity_commands(
+    command: &SshCommand,
+    public_key: Option<&Path>,
+) -> Vec<PlanCommand> {
+    if !has_host_identity(command) || command.system.is_some() {
+        return Vec::new();
+    }
+
+    let remote_dir = format!("{}/installer-git-identity", command.remote_workdir);
+    let remote_private_key = format!("{remote_dir}/id_ed25519");
+    let remote_public_key = format!("{remote_private_key}.pub");
+
+    let mut commands = Vec::new();
+    if command.generate_host_key {
+        commands.push(upload_variable_file_via_ssh_stdin_command(
+            command,
+            Phase::StageHostIdentity,
+            "upload generated SSH key for installer-side Git fetches",
+            GENERATED_HOST_KEY_VAR,
+            &remote_private_key,
+            "0600",
+        ));
+        commands.push(upload_variable_file_via_ssh_stdin_command(
+            command,
+            Phase::StageHostIdentity,
+            "upload generated SSH public key for installer-side Git fetches",
+            GENERATED_HOST_KEY_PUBLIC_VAR,
+            &remote_public_key,
+            "0644",
+        ));
+    } else if let Some(private_key) = &command.host_key {
+        commands.push(upload_file_via_ssh_stdin_command(
+            command,
+            Phase::StageHostIdentity,
+            "upload SSH key for installer-side Git fetches",
+            private_key,
+            &remote_private_key,
+            "0600",
+        ));
+        if let Some(public_key) = public_key {
+            commands.push(upload_file_via_ssh_stdin_command(
+                command,
+                Phase::StageHostIdentity,
+                "upload SSH public key for installer-side Git fetches",
+                public_key,
+                &remote_public_key,
+                "0644",
+            ));
+        }
+    }
+
+    commands.push(ssh_command(
+        command,
+        Phase::StageHostIdentity,
+        "install temporary Git SSH identity into the kexec installer",
+        true,
+        format!(
+            "set -euo pipefail; install -d -m 0700 /root/.ssh; install -o root -g root -m 0600 {} /root/.ssh/nixos-kexec-git-identity; test \"$(stat -c '%a' /root/.ssh/nixos-kexec-git-identity)\" = 600",
+            shell_quote(&remote_private_key),
+        ),
+    ));
+
+    commands
+}
+
+fn installer_git_identity_environment_script() -> &'static str {
+    "cleanup_nixos_kexec_git_identity() { rm -f /root/.ssh/nixos-kexec-git-identity; }; trap cleanup_nixos_kexec_git_identity EXIT; if [ -e /root/.ssh/nixos-kexec-git-identity ]; then export GIT_SSH_COMMAND='ssh -i /root/.ssh/nixos-kexec-git-identity -o IdentitiesOnly=yes'; fi"
+}
+
 fn upload_file_via_ssh_stdin_command(
     command: &SshCommand,
     phase: Phase,
@@ -2243,7 +2317,19 @@ mod tests {
                 && command.argv.iter().any(|arg| {
                     arg.contains("nixos-install --root /mnt --flake")
                         && arg.contains("github:example/flake#host")
+                        && arg.contains("GIT_SSH_COMMAND")
+                        && arg.contains("nixos-kexec-git-identity")
+                        && arg.contains("rm -f /root/.ssh/nixos-kexec-git-identity")
                 })
+        }));
+        assert!(plan.commands.iter().any(|command| {
+            command.phase == Phase::StageHostIdentity
+                && command.description
+                    == "install temporary Git SSH identity into the kexec installer"
+                && command
+                    .argv
+                    .iter()
+                    .any(|arg| arg.contains("/root/.ssh/nixos-kexec-git-identity"))
         }));
     }
 
@@ -2290,6 +2376,8 @@ mod tests {
         assert!(script.contains("cleanup_nixos_kexec_host_key"));
         assert!(script.contains("< \"$NIXOS_KEXEC_HOST_KEY\""));
         assert!(script.contains("< \"$NIXOS_KEXEC_HOST_KEY_PUBLIC\""));
+        assert!(script.contains("GIT_SSH_COMMAND"));
+        assert!(script.contains("/root/.ssh/nixos-kexec-git-identity"));
         assert!(script.contains("stat -c"));
         assert!(script.contains("%a"));
         assert!(script.contains("/mnt/etc/ssh/ssh_host_ed25519_key"));

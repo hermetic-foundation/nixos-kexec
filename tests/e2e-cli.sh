@@ -187,12 +187,15 @@ jq -e --arg host_key "$host_key" --arg host_key_public "$host_key.pub" '
   and .hostKeyPublic == $host_key_public
   and (.installerKnownHostsFiles | length == 1)
   and (.warnings | any(contains("deploy-time secrets")))
-  and (.commands | length == 15)
+  and (.commands | length == 18)
   and (.commands | any(.phase == "stage-install" and (.argv | any(contains("installer-known-hosts-0")))))
   and (.commands | any(.phase == "stage-install" and ((.argv | any(contains("/root/.ssh/known_hosts"))) and (.argv | any(contains("/etc/ssh/ssh_known_hosts"))))))
   and (.commands | any(.phase == "nixos-install" and (.argv | any(contains("install mount")))))
   and (.commands | any(.phase == "stage-host-identity" and (.argv | any(contains("chmod 0600") and contains("ssh_host_ed25519_key")))))
   and (.commands | any(.phase == "stage-host-identity" and (.argv | any(contains("install -o root -g root -m 0600") and contains("/mnt/etc/ssh/ssh_host_ed25519_key")))))
+  and (.commands | any(.phase == "stage-host-identity" and (.argv | any(contains("nixos-kexec-git-identity")))))
+  and (.commands | any(.phase == "nixos-install" and (.argv | any(contains("GIT_SSH_COMMAND") and contains("nixos-kexec-git-identity")))))
+  and (.commands | any(.phase == "nixos-install" and (.argv | any(contains("rm -f /root/.ssh/nixos-kexec-git-identity")))))
   and (.commands | any(.phase == "nixos-install" and (.argv | any(contains("nixos-install --root /mnt --flake") and contains("github:example/flake#host")))))
   and (.commands | all(.phase != "reboot"))
 ' "$plan_json" >/dev/null
